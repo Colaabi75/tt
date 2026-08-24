@@ -31,7 +31,7 @@
 پس از انتشار فایل در GitHub:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/USERNAME/REPOSITORY/main/trusttunnel-manager.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Colaabi75/tt/main/trusttunnel-manager.sh)
 ```
 
 اسکریپت یک فرمان دائمی هم نصب می‌کند:

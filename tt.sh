@@ -9,7 +9,7 @@ set -uo pipefail
 IFS=$'\n\t'
 
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.1.1"
+APP_VERSION="0.2.0"
 INSTALL_PATH="/usr/local/bin/trusttunnel-manager"
 STATE_DIR="/etc/trusttunnel-manager"
 STATE_FILE="$STATE_DIR/state.env"
@@ -35,6 +35,16 @@ CLIENT_MODE=""
 SOCKS_ADDRESS="127.0.0.1"
 SOCKS_PORT=""
 SOCKS_USERNAME=""
+
+DISC_COUNT=0
+declare -a DISC_ROLE=()
+declare -a DISC_SERVICE=()
+declare -a DISC_PID=()
+declare -a DISC_BINARY=()
+declare -a DISC_PRIMARY=()
+declare -a DISC_SECONDARY=()
+declare -a DISC_WORKDIR=()
+declare -a DISC_SOURCE=()
 
 if [[ -t 1 ]]; then
   RED=$'\033[0;31m'
@@ -90,7 +100,7 @@ require_platform() {
 
 install_dependencies() {
   local missing=() cmd
-  for cmd in curl openssl awk sed grep find ss timeout getent; do
+  for cmd in curl openssl awk sed grep find ss timeout getent readlink ps; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   [[ ${#missing[@]} -eq 0 ]] && return 0
@@ -99,7 +109,7 @@ install_dependencies() {
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y || return 1
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      curl openssl ca-certificates coreutils findutils iproute2 gawk grep sed || return 1
+      curl openssl ca-certificates coreutils findutils iproute2 procps gawk grep sed || return 1
   else
     error "Required tools are missing. Automatic dependency installation currently supports Debian/Ubuntu only."
     error "Missing tools: ${missing[*]}"
@@ -252,6 +262,312 @@ load_state() {
   source "$STATE_FILE"
 }
 
+normalize_path() {
+  local path="${1:-}" base="${2:-/}"
+  path="${path%\"}"
+  path="${path#\"}"
+  [[ -n "$path" ]] || return 0
+  if [[ "$path" == /* ]]; then
+    readlink -m -- "$path"
+  else
+    readlink -m -- "$base/$path"
+  fi
+}
+
+toml_get() {
+  local file="$1" section="$2" key="$3"
+  [[ -r "$file" ]] || return 1
+  awk -v wanted_section="$section" -v wanted_key="$key" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    /^[[:space:]]*\[/ {
+      current=$0
+      gsub(/^[[:space:]]*\[+|\]+[[:space:]]*$/, "", current)
+      next
+    }
+    {
+      line=$0
+      if (line !~ "^[[:space:]]*" wanted_key "[[:space:]]*=") next
+      if (current != wanted_section) next
+      sub(/^[^=]*=[[:space:]]*/, "", line)
+      line=trim(line)
+      if (line ~ /^".*"$/) {
+        sub(/^"/, "", line)
+        sub(/"[[:space:]]*$/, "", line)
+      }
+      print line
+      exit
+    }
+  ' "$file"
+}
+
+toml_has_section() {
+  local file="$1" section="$2"
+  [[ -r "$file" ]] && grep -Eq "^[[:space:]]*\\[${section//./\\.}\\][[:space:]]*$" "$file"
+}
+
+toml_client_usernames() {
+  local file="$1"
+  [[ -r "$file" ]] || return 0
+  awk '
+    /^[[:space:]]*\[\[client\]\][[:space:]]*$/ { in_client=1; next }
+    /^[[:space:]]*\[/ && $0 !~ /\[\[client\]\]/ { in_client=0 }
+    in_client && /^[[:space:]]*username[[:space:]]*=/ {
+      line=$0
+      sub(/^[^=]*=[[:space:]]*/, "", line)
+      gsub(/^"|"[[:space:]]*$/, "", line)
+      print line
+    }
+  ' "$file" | paste -sd, -
+}
+
+resolve_config_reference() {
+  local reference="${1:-}" primary="$2" workdir="${3:-}"
+  [[ -n "$reference" ]] || return 0
+  if [[ -n "$workdir" && "$workdir" != "-" ]]; then
+    normalize_path "$reference" "$workdir"
+  else
+    normalize_path "$reference" "$(dirname "$primary")"
+  fi
+}
+
+reset_discovery() {
+  DISC_COUNT=0
+  DISC_ROLE=()
+  DISC_SERVICE=()
+  DISC_PID=()
+  DISC_BINARY=()
+  DISC_PRIMARY=()
+  DISC_SECONDARY=()
+  DISC_WORKDIR=()
+  DISC_SOURCE=()
+}
+
+discovery_key_exists() {
+  local role="$1" primary="$2" binary="$3" i
+  for ((i=0; i<DISC_COUNT; i++)); do
+    if [[ -n "$primary" && "${DISC_ROLE[$i]:-}" == "$role" && \
+          "${DISC_PRIMARY[$i]:-}" == "$primary" ]]; then
+      return 0
+    fi
+    if [[ -z "$primary" && -n "$binary" && "${DISC_ROLE[$i]:-}" == "$role" && \
+          "${DISC_BINARY[$i]:-}" == "$binary" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+add_discovered_instance() {
+  local role="$1" service="$2" pid="$3" binary="$4" primary="$5"
+  local secondary="$6" workdir="$7" source="$8" i
+  [[ -n "$primary" ]] && primary="$(normalize_path "$primary" "${workdir:-/}")"
+  [[ -n "$secondary" ]] && secondary="$(normalize_path "$secondary" "${workdir:-/}")"
+  [[ -n "$binary" ]] && binary="$(normalize_path "$binary" "${workdir:-/}")"
+  discovery_key_exists "$role" "$primary" "$binary" && return 0
+  for ((i=0; i<DISC_COUNT; i++)); do
+    if [[ "${DISC_ROLE[$i]:-}" == "$role" && -n "$binary" && \
+          "${DISC_BINARY[$i]:-}" == "$binary" && \
+          ( -z "${DISC_PRIMARY[$i]:-}" || -z "$primary" ) ]]; then
+      [[ -n "${DISC_SERVICE[$i]:-}" ]] || DISC_SERVICE[$i]="$service"
+      [[ -n "${DISC_PID[$i]:-}" ]] || DISC_PID[$i]="$pid"
+      [[ -n "${DISC_PRIMARY[$i]:-}" ]] || DISC_PRIMARY[$i]="$primary"
+      [[ -n "${DISC_SECONDARY[$i]:-}" ]] || DISC_SECONDARY[$i]="$secondary"
+      [[ -n "${DISC_WORKDIR[$i]:-}" ]] || DISC_WORKDIR[$i]="$workdir"
+      return 0
+    fi
+  done
+
+  DISC_ROLE[$DISC_COUNT]="$role"
+  DISC_SERVICE[$DISC_COUNT]="$service"
+  DISC_PID[$DISC_COUNT]="$pid"
+  DISC_BINARY[$DISC_COUNT]="$binary"
+  DISC_PRIMARY[$DISC_COUNT]="$primary"
+  DISC_SECONDARY[$DISC_COUNT]="$secondary"
+  DISC_WORKDIR[$DISC_COUNT]="$workdir"
+  DISC_SOURCE[$DISC_COUNT]="$source"
+  DISC_COUNT=$((DISC_COUNT + 1))
+}
+
+parse_service_exec() {
+  local service="$1" text line runtime_exec workdir role="" binary="" primary="" secondary=""
+  local token expect_config=0
+  local -a parts=()
+  text="$(systemctl cat "$service" --no-pager 2>/dev/null || true)"
+  runtime_exec="$(systemctl show "$service" -p ExecStart --value 2>/dev/null || true)"
+  if [[ "$runtime_exec" == *trusttunnel_endpoint* || "$runtime_exec" == *trusttunnel_client* ]]; then
+    if [[ "$runtime_exec" == *'argv[]='* ]]; then
+      line="${runtime_exec#*argv[]=}"
+      line="${line%% ;*}"
+    else
+      line="$runtime_exec"
+    fi
+  else
+    line="$(grep -E '^[[:space:]]*ExecStart=.*trusttunnel_(endpoint|client)' <<< "$text" | tail -n 1)"
+  fi
+  [[ -n "$line" ]] || return 1
+  [[ "$line" == ExecStart=* ]] && line="${line#*=}"
+  line="${line#-}"
+  line="${line//\"/}"
+  workdir="$(systemctl show "$service" -p WorkingDirectory --value 2>/dev/null || true)"
+  [[ -n "$workdir" && "$workdir" != "-" ]] || workdir="/"
+
+  local IFS=' '
+  read -r -a parts <<< "$line"
+  if [[ "$line" == *trusttunnel_endpoint* ]]; then
+    role="endpoint"
+    for token in "${parts[@]}"; do
+      [[ -n "$token" ]] || continue
+      if [[ -z "$binary" && "$token" == *trusttunnel_endpoint ]]; then
+        binary="$token"
+        continue
+      fi
+      if [[ "$token" == *.toml ]]; then
+        if [[ -z "$primary" ]]; then primary="$token"; elif [[ -z "$secondary" ]]; then secondary="$token"; fi
+      fi
+    done
+  else
+    role="client"
+    for token in "${parts[@]}"; do
+      [[ -n "$token" ]] || continue
+      if [[ -z "$binary" && "$token" == *trusttunnel_client ]]; then
+        binary="$token"
+        continue
+      fi
+      if (( expect_config == 1 )); then
+        primary="$token"
+        expect_config=0
+        continue
+      fi
+      case "$token" in
+        -c|--config) expect_config=1 ;;
+        -c=*|--config=*) primary="${token#*=}" ;;
+      esac
+    done
+  fi
+
+  binary="$(normalize_path "$binary" "$workdir")"
+  primary="$(normalize_path "$primary" "$workdir")"
+  secondary="$(normalize_path "$secondary" "$workdir")"
+  add_discovered_instance "$role" "$service" "" "$binary" "$primary" \
+    "$secondary" "$workdir" "systemd"
+}
+
+discover_systemd_instances() {
+  local service unit_file
+  local -a units=()
+  while IFS= read -r unit_file; do
+    [[ -n "$unit_file" ]] && units+=("$(basename "$unit_file")")
+  done < <(
+    grep -RIlE 'trusttunnel_(endpoint|client)' \
+      /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system 2>/dev/null || true
+  )
+  while IFS= read -r service; do
+    [[ -n "$service" ]] && units+=("$service")
+  done < <(
+    systemctl list-unit-files --type=service --no-legend --no-pager 2>/dev/null |
+      awk '$1 ~ /trusttunnel/ {print $1}'
+  )
+  while IFS= read -r service; do
+    [[ -n "$service" ]] && units+=("$service")
+  done < <(
+    systemctl list-units --all --type=service --no-legend --no-pager 2>/dev/null |
+      awk '$1 ~ /trusttunnel/ {print $1}'
+  )
+
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    parse_service_exec "$service" || true
+  done < <(printf '%s\n' "${units[@]:-}" | sed '/^$/d' | sort -u)
+}
+
+find_binary_near_config() {
+  local role="$1" config="$2" dir name candidate
+  dir="$(dirname "$config")"
+  if [[ "$role" == "endpoint" ]]; then name="trusttunnel_endpoint"; else name="trusttunnel_client"; fi
+  for candidate in "$dir/$name" "$(dirname "$dir")/$name"; do
+    [[ -x "$candidate" ]] && { printf '%s' "$candidate"; return 0; }
+  done
+  return 0
+}
+
+discover_config_files() {
+  local file role binary secondary
+  local -a roots=()
+  [[ -d /opt ]] && roots+=(/opt)
+  [[ -d /etc ]] && roots+=(/etc)
+  [[ -d /root ]] && roots+=(/root)
+  [[ ${#roots[@]} -gt 0 ]] || return 0
+
+  while IFS= read -r file; do
+    role="" binary="" secondary=""
+    if grep -Eq '^[[:space:]]*listen_address[[:space:]]*=' "$file" && \
+       grep -Eq '^[[:space:]]*credentials_file[[:space:]]*=' "$file"; then
+      role="endpoint"
+      [[ -f "$(dirname "$file")/hosts.toml" ]] && secondary="$(dirname "$file")/hosts.toml"
+    elif grep -Eq '^[[:space:]]*\[endpoint\][[:space:]]*$' "$file" && \
+         grep -Eq '^[[:space:]]*\[listener\.(tun|socks)\][[:space:]]*$' "$file"; then
+      role="client"
+    else
+      continue
+    fi
+    binary="$(find_binary_near_config "$role" "$file")"
+    add_discovered_instance "$role" "" "" "$binary" "$file" "$secondary" \
+      "$(dirname "$file")" "configuration"
+  done < <(
+    find "${roots[@]}" -maxdepth 5 -type f -name '*.toml' \
+      ! -path "$BACKUP_DIR/*" 2>/dev/null | sort -u
+  )
+}
+
+discover_running_processes() {
+  local line pid args role binary primary="" secondary="" token expect_config
+  local -a parts=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    pid="${line%% *}"
+    args="${line#* }"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    role="" binary="" primary="" secondary="" expect_config=0
+    parts=()
+    local IFS=' '
+    read -r -a parts <<< "$args"
+    if [[ "$args" == *trusttunnel_endpoint* ]]; then
+      role="endpoint"
+      for token in "${parts[@]}"; do
+        if [[ -z "$binary" && "$token" == *trusttunnel_endpoint ]]; then binary="$token"; continue; fi
+        if [[ "$token" == *.toml ]]; then
+          if [[ -z "$primary" ]]; then primary="$token"; elif [[ -z "$secondary" ]]; then secondary="$token"; fi
+        fi
+      done
+    elif [[ "$args" == *trusttunnel_client* ]]; then
+      role="client"
+      for token in "${parts[@]}"; do
+        if [[ -z "$binary" && "$token" == *trusttunnel_client ]]; then binary="$token"; continue; fi
+        if (( expect_config == 1 )); then primary="$token"; expect_config=0; continue; fi
+        case "$token" in
+          -c|--config) expect_config=1 ;;
+          -c=*|--config=*) primary="${token#*=}" ;;
+        esac
+      done
+    else
+      continue
+    fi
+    add_discovered_instance "$role" "" "$pid" "$binary" "$primary" "$secondary" \
+      "/proc/$pid/cwd" "process"
+  done < <(ps -eo pid=,args= 2>/dev/null | awk '/trusttunnel_(endpoint|client)/ {$1=$1; print}')
+}
+
+discover_installations() {
+  reset_discovery
+  discover_systemd_instances
+  discover_running_processes
+  discover_config_files
+}
+
 timestamp() { date '+%Y%m%d-%H%M%S'; }
 
 backup_endpoint() {
@@ -282,6 +598,7 @@ backup_client() {
 
 download_and_run_installer() {
   local url="$1" label="$2" tmp rc
+  shift 2
   tmp="$(mktemp)" || return 1
   info "Downloading the official $label installer..."
   if ! curl -fL --connect-timeout 10 --retry 2 --retry-delay 2 -o "$tmp" "$url"; then
@@ -289,7 +606,7 @@ download_and_run_installer() {
     error "The official installer could not be downloaded. Check Internet and GitHub access."
     return 1
   fi
-  bash "$tmp"
+  bash "$tmp" "$@"
   rc=$?
   rm -f "$tmp"
   return "$rc"
@@ -958,6 +1275,463 @@ configure_client() {
   pause
 }
 
+instance_service_state() {
+  local index="$1" service pid
+  service="${DISC_SERVICE[$index]:-}"
+  pid="${DISC_PID[$index]:-}"
+  if [[ -n "$service" ]]; then
+    systemctl is-active "$service" 2>/dev/null || true
+  elif [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    printf 'running (PID %s)' "$pid"
+  else
+    printf 'configured only'
+  fi
+}
+
+instance_endpoint_credentials_file() {
+  local index="$1" primary reference
+  primary="${DISC_PRIMARY[$index]:-}"
+  [[ -n "$primary" ]] || return 0
+  reference="$(toml_get "$primary" "" "credentials_file" 2>/dev/null || true)"
+  resolve_config_reference "$reference" "$primary" "${DISC_WORKDIR[$index]:-}"
+}
+
+instance_endpoint_rules_file() {
+  local index="$1" primary reference
+  primary="${DISC_PRIMARY[$index]:-}"
+  [[ -n "$primary" ]] || return 0
+  reference="$(toml_get "$primary" "" "rules_file" 2>/dev/null || true)"
+  resolve_config_reference "$reference" "$primary" "${DISC_WORKDIR[$index]:-}"
+}
+
+instance_summary() {
+  local index="$1" role primary secondary value mode
+  role="${DISC_ROLE[$index]:-}"
+  primary="${DISC_PRIMARY[$index]:-}"
+  secondary="${DISC_SECONDARY[$index]:-}"
+  if [[ "$role" == "endpoint" ]]; then
+    value="$(toml_get "$secondary" "main_hosts" "hostname" 2>/dev/null || true)"
+    [[ -n "$value" ]] || value="$(toml_get "$primary" "" "listen_address" 2>/dev/null || true)"
+    printf '%s' "${value:-unknown endpoint}"
+  else
+    value="$(toml_get "$primary" "endpoint" "hostname" 2>/dev/null || true)"
+    if toml_has_section "$primary" "listener.socks"; then mode="SOCKS"; else mode="TUN"; fi
+    printf '%s (%s)' "${value:-unknown endpoint}" "$mode"
+  fi
+}
+
+print_discovered_list() {
+  local i role_label service state
+  if (( DISC_COUNT == 0 )); then
+    warn "No existing TrustTunnel installations were detected."
+    return 0
+  fi
+  for ((i=0; i<DISC_COUNT; i++)); do
+    [[ "${DISC_ROLE[$i]:-}" == "endpoint" ]] && role_label="Endpoint" || role_label="Client"
+    service="${DISC_SERVICE[$i]:-}"
+    [[ -n "$service" ]] || service="${DISC_SOURCE[$i]:-unmanaged}"
+    state="$(instance_service_state "$i")"
+    printf '  %d) %-8s | %-12s | %s | %s\n' \
+      "$((i+1))" "$role_label" "$state" "$(instance_summary "$i")" "$service"
+  done
+}
+
+show_instance_details() {
+  local index="$1" role service pid binary primary secondary workdir source version=""
+  local listen private domain cert key credentials rules users endpoint_address endpoint_user
+  local mode socks_address socks_user killswitch
+  role="${DISC_ROLE[$index]:-}"
+  service="${DISC_SERVICE[$index]:-}"
+  pid="${DISC_PID[$index]:-}"
+  binary="${DISC_BINARY[$index]:-}"
+  primary="${DISC_PRIMARY[$index]:-}"
+  secondary="${DISC_SECONDARY[$index]:-}"
+  workdir="${DISC_WORKDIR[$index]:-}"
+  source="${DISC_SOURCE[$index]:-}"
+
+  banner
+  printf '%sDetected TrustTunnel Details%s\n\n' "$BOLD" "$NC"
+  printf 'Role            : %s\n' "$role"
+  printf 'Discovery source: %s\n' "$source"
+  printf 'State           : %s\n' "$(instance_service_state "$index")"
+  [[ -n "$service" ]] && {
+    printf 'Service         : %s\n' "$service"
+    printf 'Enabled         : %s\n' "$(systemctl is-enabled "$service" 2>/dev/null || true)"
+  }
+  [[ -n "$pid" ]] && printf 'PID             : %s\n' "$pid"
+  printf 'Working dir     : %s\n' "${workdir:-unknown}"
+  printf 'Binary          : %s\n' "${binary:-not found}"
+  if [[ -x "$binary" ]]; then
+    version="$("$binary" --version 2>/dev/null | head -n 1 || true)"
+    printf 'Version         : %s\n' "${version:-unknown}"
+  fi
+  printf 'Primary config  : %s\n' "${primary:-not found}"
+
+  if [[ "$role" == "endpoint" ]]; then
+    printf 'TLS hosts config: %s\n' "${secondary:-not found}"
+    listen="$(toml_get "$primary" "" "listen_address" 2>/dev/null || true)"
+    private="$(toml_get "$primary" "" "allow_private_network_connections" 2>/dev/null || true)"
+    domain="$(toml_get "$secondary" "main_hosts" "hostname" 2>/dev/null || true)"
+    cert="$(toml_get "$secondary" "main_hosts" "cert_chain_path" 2>/dev/null || true)"
+    key="$(toml_get "$secondary" "main_hosts" "private_key_path" 2>/dev/null || true)"
+    credentials="$(instance_endpoint_credentials_file "$index")"
+    rules="$(instance_endpoint_rules_file "$index")"
+    users="$(toml_client_usernames "$credentials")"
+    printf 'Listen address  : %s\n' "${listen:-unknown}"
+    printf 'Hostname        : %s\n' "${domain:-unknown}"
+    printf 'Certificate     : %s\n' "${cert:-unknown}"
+    printf 'Private key     : %s\n' "${key:-unknown}"
+    printf 'Credentials file: %s\n' "${credentials:-not found}"
+    printf 'Client usernames: %s\n' "${users:-none found}"
+    printf 'Passwords       : hidden\n'
+    printf 'Rules file      : %s\n' "${rules:-not configured}"
+    printf 'Private networks: %s\n' "${private:-false/default}"
+  else
+    endpoint_address="$(toml_get "$primary" "endpoint" "addresses" 2>/dev/null || true)"
+    domain="$(toml_get "$primary" "endpoint" "hostname" 2>/dev/null || true)"
+    endpoint_user="$(toml_get "$primary" "endpoint" "username" 2>/dev/null || true)"
+    killswitch="$(toml_get "$primary" "" "killswitch_enabled" 2>/dev/null || true)"
+    if toml_has_section "$primary" "listener.socks"; then
+      mode="SOCKS5"
+      socks_address="$(toml_get "$primary" "listener.socks" "address" 2>/dev/null || true)"
+      socks_user="$(toml_get "$primary" "listener.socks" "username" 2>/dev/null || true)"
+    else
+      mode="TUN"
+      socks_address=""
+      socks_user=""
+    fi
+    printf 'Endpoint hostname: %s\n' "${domain:-unknown}"
+    printf 'Endpoint address : %s\n' "${endpoint_address:-unknown}"
+    printf 'Endpoint username: %s\n' "${endpoint_user:-unknown}"
+    printf 'Endpoint password: hidden\n'
+    printf 'Listener mode    : %s\n' "$mode"
+    [[ -n "$socks_address" ]] && printf 'SOCKS address    : %s\n' "$socks_address"
+    [[ -n "$socks_user" ]] && printf 'SOCKS username   : %s\n' "$socks_user"
+    [[ "$mode" == "SOCKS5" ]] && printf 'SOCKS password   : hidden\n'
+    printf 'Kill switch      : %s\n' "${killswitch:-default}"
+  fi
+  pause
+}
+
+backup_discovered_instance() {
+  local index="$1" dst file fragment credentials rules
+  dst="$BACKUP_DIR/discovered-$(timestamp)-$((index+1))"
+  install -d -m 0700 "$dst"
+  for file in "${DISC_PRIMARY[$index]:-}" "${DISC_SECONDARY[$index]:-}"; do
+    [[ -f "$file" ]] && cp -a -- "$file" "$dst/"
+  done
+  if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
+    credentials="$(instance_endpoint_credentials_file "$index")"
+    rules="$(instance_endpoint_rules_file "$index")"
+    for file in "$credentials" "$rules"; do
+      [[ -f "$file" ]] && cp -a -- "$file" "$dst/"
+    done
+  fi
+  if [[ -n "${DISC_SERVICE[$index]:-}" ]]; then
+    fragment="$(systemctl show "${DISC_SERVICE[$index]}" -p FragmentPath --value 2>/dev/null || true)"
+    [[ -f "$fragment" ]] && cp -a -- "$fragment" "$dst/"
+  fi
+  umask 077
+  {
+    printf 'role=%s\n' "${DISC_ROLE[$index]:-}"
+    printf 'service=%s\n' "${DISC_SERVICE[$index]:-}"
+    printf 'binary=%s\n' "${DISC_BINARY[$index]:-}"
+    printf 'primary=%s\n' "${DISC_PRIMARY[$index]:-}"
+    printf 'secondary=%s\n' "${DISC_SECONDARY[$index]:-}"
+  } > "$dst/inventory.txt"
+  chmod -R go-rwx "$dst"
+  ok "Backup created: $dst"
+}
+
+restart_discovered_instance() {
+  local index="$1" service
+  service="${DISC_SERVICE[$index]:-}"
+  if [[ -z "$service" ]]; then
+    error "This installation is not attached to a detected systemd service."
+    return 1
+  fi
+  if systemctl restart "$service"; then
+    sleep 1
+    if systemctl is-active --quiet "$service"; then
+      ok "Service restarted successfully."
+      return 0
+    fi
+  fi
+  error "Service restart failed."
+  journalctl -u "$service" -n 30 --no-pager || true
+  return 1
+}
+
+show_discovered_logs() {
+  local index="$1" service choice
+  service="${DISC_SERVICE[$index]:-}"
+  if [[ -z "$service" ]]; then
+    error "No systemd service was detected, so journal logs are unavailable."
+    pause
+    return 1
+  fi
+  printf '1) Last 80 lines\n2) Follow live logs (exit with Ctrl+C)\n'
+  read -r -p "Select [1]: " choice || return 1
+  choice="${choice:-1}"
+  if [[ "$choice" == "2" ]]; then
+    journalctl -u "$service" -f --no-pager || true
+  else
+    journalctl -u "$service" -n 80 --no-pager || true
+    pause
+  fi
+}
+
+select_instance_config_file() {
+  local index="$1" primary secondary credentials rules choice i file
+  local -a files=() labels=()
+  primary="${DISC_PRIMARY[$index]:-}"
+  secondary="${DISC_SECONDARY[$index]:-}"
+  [[ -f "$primary" ]] && { files+=("$primary"); labels+=("Primary configuration"); }
+  [[ -f "$secondary" ]] && { files+=("$secondary"); labels+=("TLS hosts configuration"); }
+  if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
+    credentials="$(instance_endpoint_credentials_file "$index")"
+    rules="$(instance_endpoint_rules_file "$index")"
+    [[ -f "$credentials" ]] && { files+=("$credentials"); labels+=("Credentials configuration"); }
+    [[ -f "$rules" ]] && { files+=("$rules"); labels+=("Rules configuration"); }
+  fi
+  if (( ${#files[@]} == 0 )); then
+    error "No editable configuration files were found."
+    return 1
+  fi
+  printf 'Configuration files:\n' >&2
+  for i in "${!files[@]}"; do
+    printf '  %d) %s - %s\n' "$((i+1))" "${labels[$i]}" "${files[$i]}" >&2
+  done
+  while true; do
+    read -r -p "Select a file: " choice || return 1
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#files[@]} )); then
+      file="${files[$((choice-1))]}"
+      printf '%s' "$file"
+      return 0
+    fi
+    warn "Invalid selection."
+  done
+}
+
+edit_instance_config() {
+  local index="$1" file editor_value backup_file service
+  local -a editor_command=()
+  banner
+  warn "Passwords are stored in these TOML files. Do not copy their contents into public chats."
+  file="$(select_instance_config_file "$index")" || { pause; return 1; }
+  backup_file="$file.before-manager-edit-$(timestamp)"
+  cp -a -- "$file" "$backup_file" || { error "Could not create an edit backup."; pause; return 1; }
+  chmod go-rwx "$backup_file" 2>/dev/null || true
+  ok "Edit backup: $backup_file"
+
+  editor_value="${EDITOR:-}"
+  if [[ -z "$editor_value" ]]; then
+    if command -v nano >/dev/null 2>&1; then editor_value="nano"; else editor_value="vi"; fi
+  fi
+  local IFS=' '
+  read -r -a editor_command <<< "$editor_value"
+  if ! command -v "${editor_command[0]}" >/dev/null 2>&1; then
+    error "Editor not found: ${editor_command[0]}"
+    pause
+    return 1
+  fi
+  "${editor_command[@]}" "$file" || {
+    error "The editor exited with an error. The original backup is unchanged."
+    pause
+    return 1
+  }
+  chmod 0600 "$file" 2>/dev/null || true
+
+  service="${DISC_SERVICE[$index]:-}"
+  if [[ -n "$service" ]]; then
+    if restart_discovered_instance "$index"; then
+      ok "Configuration edit applied successfully."
+    else
+      if confirm "Restore the configuration backup now?" "y"; then
+        cp -a -- "$backup_file" "$file"
+        systemctl restart "$service" || true
+        warn "The previous configuration was restored."
+      fi
+    fi
+  else
+    warn "The file was edited, but no systemd service was detected to restart."
+  fi
+  pause
+}
+
+safe_trusttunnel_directory() {
+  local directory real base
+  directory="$1"
+  [[ -n "$directory" ]] || return 1
+  real="$(readlink -m -- "$directory")"
+  [[ "$real" != "$STATE_DIR" && "$real" != "$STATE_DIR/"* ]] || return 1
+  base="$(basename "$real")"
+  [[ "$base" != "trusttunnel-manager" ]] || return 1
+  case "$real" in
+    /opt/*|/etc/*)
+      [[ "$base" == "trusttunnel" || "$base" == "trusttunnel_client" || \
+         "$base" == trusttunnel-* || "$base" == trusttunnel_* ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+remove_discovered_instance() {
+  local index="$1" service pid fragment install_dir choice typed same_dir_count=0 i
+  service="${DISC_SERVICE[$index]:-}"
+  pid="${DISC_PID[$index]:-}"
+  if [[ -n "${DISC_BINARY[$index]:-}" ]]; then
+    install_dir="$(dirname "${DISC_BINARY[$index]}")"
+  else
+    install_dir="$(dirname "${DISC_PRIMARY[$index]:-/}")"
+  fi
+
+  banner
+  show_instance_details "$index"
+  warn "Removal is destructive. A backup will be created first."
+  printf '  1) Remove/disable the service only; keep all TrustTunnel files\n'
+  printf '  2) Remove the service and this instance configuration'
+  if safe_trusttunnel_directory "$install_dir"; then
+    printf ' (and installation directory when not shared)'
+  fi
+  printf '\n'
+  printf '  0) Cancel\n'
+  read -r -p "Select: " choice || return 1
+  [[ "$choice" == "0" ]] && return 0
+  if [[ "$choice" != "1" && "$choice" != "2" ]]; then
+    warn "Invalid selection."
+    pause
+    return 1
+  fi
+  read -r -p "Type REMOVE to confirm: " typed || return 1
+  [[ "$typed" == "REMOVE" ]] || { warn "Removal cancelled."; pause; return 0; }
+
+  backup_discovered_instance "$index"
+  if [[ -n "$service" ]]; then
+    systemctl disable --now "$service" >/dev/null 2>&1 || true
+    fragment="$(systemctl show "$service" -p FragmentPath --value 2>/dev/null || true)"
+    if [[ "$fragment" == /etc/systemd/system/*.service ]]; then
+      rm -f -- "$fragment"
+    else
+      warn "The service unit is outside /etc/systemd/system and was disabled but not deleted."
+    fi
+  elif [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+
+  if [[ "$choice" == "2" ]]; then
+    for ((i=0; i<DISC_COUNT; i++)); do
+      [[ "$(dirname "${DISC_PRIMARY[$i]:-/}")" == "$install_dir" ]] && \
+        same_dir_count=$((same_dir_count + 1))
+    done
+    if safe_trusttunnel_directory "$install_dir" && (( same_dir_count <= 1 )); then
+      rm -rf -- "$install_dir"
+      ok "Removed installation directory: $install_dir"
+    else
+      local config_file credentials rules
+      credentials="$(instance_endpoint_credentials_file "$index")"
+      rules="$(instance_endpoint_rules_file "$index")"
+      for config_file in "${DISC_PRIMARY[$index]:-}" "${DISC_SECONDARY[$index]:-}" \
+        "$credentials" "$rules"; do
+        [[ -f "$config_file" ]] && rm -f -- "$config_file"
+      done
+      if (( same_dir_count > 1 )); then
+      warn "Multiple detected tunnels share $install_dir; the directory was preserved."
+        warn "Only the selected instance configuration files were removed."
+      else
+        warn "The install directory is outside safe removal paths and was preserved."
+        ok "Detected configuration files for this instance were removed."
+      fi
+    fi
+  fi
+  systemctl daemon-reload
+  ok "Selected TrustTunnel instance was removed."
+  pause
+}
+
+update_discovered_instance() {
+  local index="$1" role service binary target url label
+  role="${DISC_ROLE[$index]:-}"
+  service="${DISC_SERVICE[$index]:-}"
+  binary="${DISC_BINARY[$index]:-}"
+  [[ -x "$binary" ]] || { error "The TrustTunnel binary was not found."; pause; return 1; }
+  target="$(dirname "$binary")"
+  if [[ "$role" == "endpoint" ]]; then
+    url="$ENDPOINT_INSTALL_URL" label="Endpoint"
+  else
+    url="$CLIENT_INSTALL_URL" label="Client"
+  fi
+  backup_discovered_instance "$index"
+  [[ -n "$service" ]] && systemctl stop "$service" >/dev/null 2>&1 || true
+  if download_and_run_installer "$url" "TrustTunnel $label" -o "$target"; then
+    [[ -n "$service" ]] && systemctl start "$service" || true
+    ok "TrustTunnel $label was updated."
+    [[ -n "$service" ]] || warn "No systemd service was detected. Restart this instance manually."
+  else
+    error "Update failed."
+    [[ -n "$service" ]] && systemctl start "$service" >/dev/null 2>&1 || true
+  fi
+  pause
+}
+
+manage_discovered_instance() {
+  local index="$1" choice
+  while true; do
+    banner
+    printf '%sManage %s%s\n' "$BOLD" "$(instance_summary "$index")" "$NC"
+    printf 'State: %s\n\n' "$(instance_service_state "$index")"
+    printf '  1) View details\n'
+    printf '  2) Show service status\n'
+    printf '  3) View logs\n'
+    printf '  4) Restart service\n'
+    printf '  5) Edit configuration\n'
+    printf '  6) Create backup\n'
+    printf '  7) Update TrustTunnel core\n'
+    printf '  8) Remove this instance\n'
+    printf '  0) Back\n\n'
+    read -r -p "Select: " choice || return 0
+    case "$choice" in
+      1) show_instance_details "$index" ;;
+      2)
+        if [[ -n "${DISC_SERVICE[$index]:-}" ]]; then
+          systemctl status "${DISC_SERVICE[$index]}" --no-pager -l || true
+        else
+          printf 'State: %s\nPID: %s\n' \
+            "$(instance_service_state "$index")" "${DISC_PID[$index]:-not detected}"
+        fi
+        pause
+        ;;
+      3) show_discovered_logs "$index" ;;
+      4) restart_discovered_instance "$index"; pause ;;
+      5) edit_instance_config "$index" ;;
+      6) backup_discovered_instance "$index"; pause ;;
+      7) update_discovered_instance "$index" ;;
+      8) remove_discovered_instance "$index"; return 0 ;;
+      0) return 0 ;;
+      *) warn "Invalid option."; sleep 1 ;;
+    esac
+  done
+}
+
+manage_discovered_installations() {
+  local choice
+  while true; do
+    discover_installations
+    banner
+    printf '%sDetected TrustTunnel Installations: %d%s\n\n' "$BOLD" "$DISC_COUNT" "$NC"
+    print_discovered_list
+    printf '\n  0) Back\n\n'
+    read -r -p "Select an installation: " choice || return 0
+    [[ "$choice" == "0" ]] && return 0
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= DISC_COUNT )); then
+      manage_discovered_instance "$((choice-1))"
+    else
+      warn "Invalid selection."
+      sleep 1
+    fi
+  done
+}
+
 show_status() {
   banner
   printf '%sService Status%s\n\n' "$BOLD" "$NC"
@@ -1097,49 +1871,37 @@ choose_initial_role() {
 }
 
 main_menu() {
-  local choice role_name
+  local choice first_run=1
   while true; do
-    [[ -z "$ROLE" ]] && { choose_initial_role; load_state; }
-    [[ "$ROLE" == "foreign" ]] && role_name="Foreign / Endpoint" || role_name="Iran / Client"
-    banner
-    printf 'Current role: %s%s%s\n\n' "$GREEN" "$role_name" "$NC"
-    printf '  1) Service status\n'
-    printf '  2) View logs\n'
-    printf '  3) Restart service\n'
-    printf '  4) Edit / reconfigure\n'
-    if [[ "$ROLE" == "foreign" ]]; then
-      printf '  5) Regenerate Iran client TOML export\n'
-    else
-      printf '  5) Show SOCKS settings for 3x-ui\n'
+    discover_installations
+    if (( first_run == 1 && DISC_COUNT == 0 )) && [[ -z "$ROLE" ]]; then
+      choose_initial_role
+      load_state
+      first_run=0
+      continue
     fi
-    printf '  6) Update TrustTunnel core\n'
-    printf '  7) Remove TrustTunnel from this server\n'
+    first_run=0
+    banner
+    printf 'Detected installations: %s%d%s\n\n' "$GREEN" "$DISC_COUNT" "$NC"
+    print_discovered_list
+    printf '\n'
+    printf '  1) View and manage detected installations\n'
+    printf '  2) Install or reconfigure Foreign Endpoint\n'
+    printf '  3) Install or reconfigure Iran Client\n'
+    printf '  4) List manager backups\n'
     printf '  0) Exit\n\n'
     read -r -p "Select: " choice || exit 0
     case "$choice" in
-      1) show_status ;;
-      2) show_logs ;;
-      3) restart_role_service ;;
+      1) manage_discovered_installations ;;
+      2) configure_endpoint ;;
+      3) configure_client ;;
       4)
-        if [[ "$ROLE" == "foreign" ]]; then configure_endpoint; else configure_client; fi
+        banner
+        printf 'Backup directory: %s\n\n' "$BACKUP_DIR"
+        find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '  %TY-%Tm-%Td %TH:%TM  %f\n' \
+          2>/dev/null | sort -r || true
+        pause
         ;;
-      5)
-        if [[ "$ROLE" == "foreign" ]]; then
-          export_client_toml && pause
-        else
-          banner
-          if [[ "$CLIENT_MODE" == "socks" ]]; then
-            printf 'Protocol: SOCKS\nAddress : %s\nPort    : %s\nUsername: %s\n' \
-              "$SOCKS_ADDRESS" "$SOCKS_PORT" "$SOCKS_USERNAME"
-            printf 'Password: use the SOCKS password entered during setup\n'
-          else
-            warn "The client is in TUN mode and has no SOCKS listener."
-          fi
-          pause
-        fi
-        ;;
-      6) update_core ;;
-      7) uninstall_role ;;
       0) exit 0 ;;
       *) warn "Invalid option."; sleep 1 ;;
     esac
@@ -1152,7 +1914,7 @@ $APP_NAME v$APP_VERSION
 
 Usage:
   trusttunnel-manager            Interactive menu
-  trusttunnel-manager --status   Show service status
+  trusttunnel-manager --status   Discover and list installations
   trusttunnel-manager --help     Show this help
 EOF
 }
@@ -1167,7 +1929,11 @@ main() {
 
   case "${1:-}" in
     --help|-h) usage ;;
-    --status) show_status ;;
+    --status)
+      discover_installations
+      printf 'Detected TrustTunnel installations: %d\n' "$DISC_COUNT"
+      print_discovered_list
+      ;;
     "") main_menu ;;
     *) usage; exit 1 ;;
   esac

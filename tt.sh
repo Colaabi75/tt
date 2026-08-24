@@ -9,7 +9,7 @@ set -uo pipefail
 IFS=$'\n\t'
 
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.1.0"
+APP_VERSION="0.1.1"
 INSTALL_PATH="/usr/local/bin/trusttunnel-manager"
 STATE_DIR="/etc/trusttunnel-manager"
 STATE_FILE="$STATE_DIR/state.env"
@@ -52,38 +52,38 @@ ok() { printf '%s[OK]%s %s\n' "$GREEN" "$NC" "$*"; }
 warn() { printf '%s[WARN]%s %s\n' "$YELLOW" "$NC" "$*" >&2; }
 error() { printf '%s[ERROR]%s %s\n' "$RED" "$NC" "$*" >&2; }
 hr() { printf '%*s\n' "${COLUMNS:-68}" '' | tr ' ' '-'; }
-pause() { printf '\n'; read -r -p "برای ادامه Enter بزنید... " _ || true; }
+pause() { printf '\n'; read -r -p "Press Enter to continue... " _ || true; }
 
 banner() {
   clear 2>/dev/null || true
   printf '%s%s%s v%s\n' "$BOLD" "$APP_NAME" "$NC" "$APP_VERSION"
-  printf 'مدیریت یکپارچه Endpoint خارج و Client ایران\n'
+  printf 'Unified manager for Foreign Endpoint and Iran Client\n'
   hr
 }
 
 require_root() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    error "این اسکریپت باید با کاربر root اجرا شود."
+    error "This script must be run as root."
     exit 1
   fi
 }
 
 require_platform() {
   if [[ "$(uname -s)" != "Linux" ]]; then
-    error "این نسخه فقط Linux را پشتیبانی می‌کند."
+    error "This version supports Linux only."
     exit 1
   fi
 
   case "$(uname -m)" in
     x86_64|aarch64|arm64) ;;
     *)
-      error "معماری $(uname -m) توسط بسته‌های رسمی TrustTunnel پشتیبانی نمی‌شود."
+      error "Architecture $(uname -m) is not supported by the official TrustTunnel packages."
       exit 1
       ;;
   esac
 
   if ! command -v systemctl >/dev/null 2>&1; then
-    error "systemd روی این سرور پیدا نشد."
+    error "systemd was not found on this server."
     exit 1
   fi
 }
@@ -95,14 +95,14 @@ install_dependencies() {
   done
   [[ ${#missing[@]} -eq 0 ]] && return 0
 
-  info "نصب ابزارهای لازم..."
+  info "Installing required tools..."
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y || return 1
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
       curl openssl ca-certificates coreutils findutils iproute2 gawk grep sed || return 1
   else
-    error "ابزارهای لازم ناقص‌اند و فعلاً فقط نصب خودکار Debian/Ubuntu پشتیبانی می‌شود."
-    error "موارد ناقص: ${missing[*]}"
+    error "Required tools are missing. Automatic dependency installation currently supports Debian/Ubuntu only."
+    error "Missing tools: ${missing[*]}"
     return 1
   fi
 }
@@ -136,7 +136,7 @@ ask_value() {
       printf '%s' "$value"
       return 0
     fi
-    warn "این مقدار نمی‌تواند خالی باشد."
+    warn "This value cannot be empty."
   done
 }
 
@@ -146,16 +146,16 @@ ask_secret() {
     read -r -s -p "$prompt: " first || return 1
     printf '\n' >&2
     if [[ ${#first} -lt 12 ]]; then
-      warn "رمز باید حداقل ۱۲ کاراکتر باشد."
+      warn "The password must contain at least 12 characters."
       continue
     fi
-    read -r -s -p "تکرار رمز: " second || return 1
+    read -r -s -p "Repeat password: " second || return 1
     printf '\n' >&2
     if [[ "$first" == "$second" ]]; then
       printf '%s' "$first"
       return 0
     fi
-    warn "دو رمز یکسان نیستند."
+    warn "The passwords do not match."
   done
 }
 
@@ -171,7 +171,7 @@ ask_username() {
       printf '%s' "$value"
       return 0
     fi
-    warn "نام کاربری فقط می‌تواند شامل حروف انگلیسی، عدد و . _ @ - باشد."
+    warn "The username may contain only English letters, numbers, and . _ @ -"
   done
 }
 
@@ -185,13 +185,13 @@ valid_domain() {
 ask_domain() {
   local default="${1:-}" value
   while true; do
-    value="$(ask_value "دامنه‌ای که مستقیم به سرور خارج اشاره می‌کند" "$default")" || return 1
+    value="$(ask_value "Domain pointing directly to the foreign server" "$default")" || return 1
     value="${value,,}"
     if valid_domain "$value"; then
       printf '%s' "$value"
       return 0
     fi
-    warn "دامنه معتبر نیست؛ نمونه: t1.example.com"
+    warn "Invalid domain. Example: t1.example.com"
   done
 }
 
@@ -207,7 +207,7 @@ ask_port() {
       printf '%s' "$value"
       return 0
     fi
-    warn "پورت باید عددی بین 1 تا 65535 باشد."
+    warn "The port must be a number between 1 and 65535."
   done
 }
 
@@ -245,7 +245,7 @@ save_state() {
 load_state() {
   [[ -f "$STATE_FILE" ]] || return 0
   if [[ "$(stat -c '%u' "$STATE_FILE" 2>/dev/null || echo 1)" != "0" ]]; then
-    warn "فایل وضعیت متعلق به root نیست؛ برای امنیت خوانده نشد."
+    warn "The state file is not owned by root and was not loaded for security reasons."
     return 0
   fi
   # shellcheck disable=SC1090
@@ -264,7 +264,7 @@ backup_endpoint() {
   done
   [[ -f "$ENDPOINT_UNIT" ]] && cp -a "$ENDPOINT_UNIT" "$dst/"
   [[ -f "$STATE_FILE" ]] && cp -a "$STATE_FILE" "$dst/"
-  ok "بکاپ تنظیمات قبلی: $dst"
+  ok "Previous endpoint configuration backed up to: $dst"
 }
 
 backup_client() {
@@ -277,16 +277,16 @@ backup_client() {
   done
   [[ -f "$CLIENT_UNIT" ]] && cp -a "$CLIENT_UNIT" "$dst/"
   [[ -f "$STATE_FILE" ]] && cp -a "$STATE_FILE" "$dst/"
-  ok "بکاپ تنظیمات قبلی: $dst"
+  ok "Previous client configuration backed up to: $dst"
 }
 
 download_and_run_installer() {
   local url="$1" label="$2" tmp rc
   tmp="$(mktemp)" || return 1
-  info "دریافت نصب‌کننده رسمی $label..."
+  info "Downloading the official $label installer..."
   if ! curl -fL --connect-timeout 10 --retry 2 --retry-delay 2 -o "$tmp" "$url"; then
     rm -f "$tmp"
-    error "دانلود نصب‌کننده رسمی انجام نشد؛ اینترنت یا دسترسی GitHub را بررسی کنید."
+    error "The official installer could not be downloaded. Check Internet and GitHub access."
     return 1
   fi
   bash "$tmp"
@@ -302,24 +302,24 @@ certificate_count() {
 verify_certificate() {
   local domain="$1" cert="$2" key="$3" tmp cert_fp key_fp count chain=""
 
-  [[ -r "$cert" ]] || { error "فایل گواهی قابل خواندن نیست: $cert"; return 1; }
-  [[ -r "$key" ]] || { error "فایل کلید خصوصی قابل خواندن نیست: $key"; return 1; }
+  [[ -r "$cert" ]] || { error "Certificate file is not readable: $cert"; return 1; }
+  [[ -r "$key" ]] || { error "Private key file is not readable: $key"; return 1; }
 
   if ! openssl x509 -in "$cert" -noout >/dev/null 2>&1; then
-    error "فایل CRT/PEM یک گواهی معتبر نیست."
+    error "The CRT/PEM file does not contain a valid certificate."
     return 1
   fi
   if ! openssl pkey -in "$key" -noout >/dev/null 2>&1; then
-    error "Private Key معتبر نیست یا رمزگذاری شده و قابل خواندن نیست."
+    error "The private key is invalid, encrypted, or cannot be read non-interactively."
     return 1
   fi
   if ! openssl x509 -in "$cert" -checkend 0 -noout >/dev/null 2>&1; then
-    error "گواهی منقضی شده یا هنوز معتبر نشده است."
+    error "The certificate has expired or is not valid yet."
     openssl x509 -in "$cert" -noout -dates 2>/dev/null || true
     return 1
   fi
   if ! openssl x509 -in "$cert" -noout -checkhost "$domain" >/dev/null 2>&1; then
-    error "دامنه $domain داخل SAN/CN این گواهی نیست."
+    error "Domain $domain is not covered by the certificate SAN/CN."
     return 1
   fi
 
@@ -328,13 +328,13 @@ verify_certificate() {
   key_fp="$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | \
     openssl dgst -sha256 2>/dev/null)"
   if [[ -z "$cert_fp" || "$cert_fp" != "$key_fp" ]]; then
-    error "گواهی و Private Key با هم جفت نیستند."
+    error "The certificate and private key do not match."
     return 1
   fi
 
   count="$(certificate_count "$cert")"
   if (( count < 2 )); then
-    error "فایل گواهی فقط Leaf Certificate دارد؛ Full Chain لازم است."
+    error "The certificate file contains only the leaf certificate. A full chain is required."
     return 1
   fi
 
@@ -354,13 +354,13 @@ verify_certificate() {
       -CAfile /etc/ssl/certs/ca-certificates.crt \
       -untrusted "$chain" "$tmp/cert-1.pem" >/dev/null 2>&1; then
       rm -rf "$tmp"
-      error "زنجیره گواهی با CAهای سیستم تأیید نشد. فایل Full Chain را بررسی کنید."
+      error "The certificate chain could not be verified with the system CA store. Check the full-chain file."
       return 1
     fi
   fi
   rm -rf "$tmp"
 
-  ok "گواهی معتبر است، دامنه را پوشش می‌دهد و با Private Key جفت است."
+  ok "The certificate is valid, covers the domain, and matches the private key."
   openssl x509 -in "$cert" -noout -subject -issuer -dates | sed 's/^/  /'
   return 0
 }
@@ -369,21 +369,21 @@ check_domain_dns() {
   local domain="$1" public_ip="" resolved=""
   resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, -)"
   if [[ -z "$resolved" ]]; then
-    error "دامنه $domain در DNS به IPv4 تبدیل نشد."
+    error "Domain $domain did not resolve to an IPv4 address."
     return 1
   fi
-  info "IPv4 دامنه: $resolved"
+  info "Domain IPv4: $resolved"
 
   public_ip="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
   if [[ -n "$public_ip" ]]; then
-    info "IPv4 عمومی این سرور: $public_ip"
+    info "Server public IPv4: $public_ip"
     if ! tr ',' '\n' <<< "$resolved" | grep -Fxq "$public_ip"; then
-      warn "DNS دامنه با IP عمومی این سرور یکسان نیست."
-      warn "اگر Cloudflare Proxy روشن است، آن را DNS only کنید."
-      confirm "با وجود این اختلاف ادامه دهم؟" "n" || return 1
+      warn "The domain DNS record does not match this server's public IPv4."
+      warn "If Cloudflare Proxy is enabled, change the record to DNS only."
+      confirm "Continue despite this mismatch?" "n" || return 1
     fi
   else
-    warn "IP عمومی سرور خودکار تشخیص داده نشد؛ فقط DNS بررسی شد."
+    warn "The server public IP could not be detected automatically; only DNS resolution was checked."
   fi
   return 0
 }
@@ -396,14 +396,14 @@ ensure_endpoint_port_free() {
   local users
   users="$(port_443_users)"
   if [[ -n "$users" ]]; then
-    error "پورت TCP یا UDP شماره 443 آزاد نیست:"
+    error "TCP or UDP port 443 is already in use:"
     printf '%s\n' "$users"
     printf '\n'
-    error "سرویس نشان‌داده‌شده را خودتان متوقف یا به پورت دیگری منتقل کنید."
-    error "اسکریپت برای جلوگیری از قطع 3x-ui/Xray چیزی را خودکار متوقف نمی‌کند."
+    error "Stop the listed service manually or move it to another port."
+    error "To avoid disrupting 3x-ui/Xray, this manager will not stop it automatically."
     return 1
   fi
-  ok "پورت TCP و UDP شماره 443 آزاد است."
+  ok "TCP and UDP port 443 are free."
 }
 
 write_endpoint_hosts() {
@@ -434,7 +434,7 @@ generate_endpoint_config() {
   rm -f "$ENDPOINT_DIR/vpn.toml" "$ENDPOINT_DIR/hosts.toml" \
     "$ENDPOINT_DIR/credentials.toml" "$ENDPOINT_DIR/rules.toml"
 
-  info "ساخت تنظیمات Endpoint..."
+  info "Generating endpoint configuration..."
   # The final endpoint password must not appear in setup_wizard's process arguments.
   # A disposable password is used for the wizard; credentials.toml is then written
   # directly with root-only permissions.
@@ -455,13 +455,13 @@ generate_endpoint_config() {
   unset bootstrap_password
 
   if [[ ! -s "$ENDPOINT_DIR/vpn.toml" ]]; then
-    error "Wizard نتوانست vpn.toml را بسازد."
+    error "The setup wizard could not create vpn.toml."
     tail -n 20 "$log" 2>/dev/null || true
     return 1
   fi
 
   if [[ $rc -ne 0 ]]; then
-    warn "مرحله TLS در Wizard کامل نشد؛ فایل hosts.toml با قالب رسمی ساخته می‌شود."
+    warn "The wizard did not finish its TLS stage. hosts.toml will be created using the official format."
   fi
 
   write_endpoint_credentials "$username" "$password"
@@ -481,11 +481,11 @@ validate_endpoint_runtime() {
 
   if grep -q 'Listening to TCP 0.0.0.0:443' "$log" && \
      grep -q 'Listening to UDP 0.0.0.0:443' "$log"; then
-    ok "تست Endpoint موفق بود؛ TCP و UDP روی 443 آماده‌اند."
+    ok "Endpoint test passed. TCP and UDP are ready on port 443."
     return 0
   fi
 
-  error "Endpoint اجرا نشد:"
+  error "The endpoint failed to start:"
   tail -n 20 "$log" 2>/dev/null || true
   [[ $rc -eq 0 ]] || true
   return 1
@@ -518,17 +518,17 @@ EOF
 
 start_endpoint() {
   if ! systemctl restart "$ENDPOINT_SERVICE"; then
-    error "سرویس Endpoint بالا نیامد."
+    error "The endpoint service failed to start."
     systemctl status "$ENDPOINT_SERVICE" --no-pager -l || true
     return 1
   fi
   sleep 1
   if ! systemctl is-active --quiet "$ENDPOINT_SERVICE"; then
-    error "سرویس Endpoint فعال نماند."
+    error "The endpoint service did not remain active."
     journalctl -u "$ENDPOINT_SERVICE" -n 30 --no-pager || true
     return 1
   fi
-  ok "سرویس Endpoint فعال و در شروع سیستم Enabled است."
+  ok "The endpoint service is active and enabled at boot."
 }
 
 test_endpoint_tls() {
@@ -539,10 +539,10 @@ test_endpoint_tls() {
     -verify_hostname "$domain" \
     -verify_return_error </dev/null 2>&1 || true)"
   if grep -q 'Verify return code: 0 (ok)' <<< "$output"; then
-    ok "TLS و نام دامنه با اتصال محلی تأیید شد."
+    ok "TLS and hostname verification passed through a local connection."
     return 0
   fi
-  error "سرویس بالا است ولی تست TLS موفق نبود."
+  error "The service is running, but the TLS test failed."
   grep -E 'verify error|Verify return code|subject=|issuer=' <<< "$output" || true
   return 1
 }
@@ -550,13 +550,13 @@ test_endpoint_tls() {
 export_client_toml() {
   local username="${1:-$ENDPOINT_USERNAME}" tmp
   [[ -x "$ENDPOINT_DIR/trusttunnel_endpoint" ]] || {
-    error "Endpoint نصب نیست."
+    error "The endpoint is not installed."
     return 1
   }
   [[ -n "$DOMAIN" ]] || DOMAIN="$(awk -F'"' '/^[[:space:]]*hostname[[:space:]]*=/{print $2; exit}' "$ENDPOINT_DIR/hosts.toml")"
   [[ -n "$username" ]] || username="$(awk -F'"' '/^[[:space:]]*username[[:space:]]*=/{print $2; exit}' "$ENDPOINT_DIR/credentials.toml")"
   [[ -n "$DOMAIN" && -n "$username" ]] || {
-    error "دامنه یا نام کاربری Endpoint از تنظیمات خوانده نشد."
+    error "The endpoint domain or username could not be read from the configuration."
     return 1
   }
 
@@ -566,43 +566,43 @@ export_client_toml() {
     ./trusttunnel_endpoint vpn.toml hosts.toml \
       -c "$username" -a "$DOMAIN:443" --format toml
   ) > "$tmp" 2>"$STATE_DIR/export-error.log"; then
-    error "فایل کلاینت ساخته نشد."
+    error "The client export file could not be generated."
     tail -n 20 "$STATE_DIR/export-error.log" 2>/dev/null || true
     rm -f "$tmp"
     return 1
   fi
   if ! grep -q '^\[endpoint\]' "$tmp"; then
-    error "خروجی Endpoint یک فایل TOML کلاینت معتبر نیست."
+    error "The endpoint output is not a valid client TOML file."
     rm -f "$tmp"
     return 1
   fi
   install -m 0600 "$tmp" "$ENDPOINT_EXPORT"
   rm -f "$tmp"
-  ok "فایل اتصال ایران ساخته شد: $ENDPOINT_EXPORT"
-  warn "این فایل شامل رمز Endpoint است؛ عمومی یا داخل GitHub قرارش ندهید."
+  ok "The Iran client export file was created: $ENDPOINT_EXPORT"
+  warn "This file contains the endpoint password. Never publish it or upload it to GitHub."
 }
 
 configure_endpoint() {
   local domain cert key username password was_active=0
   banner
-  printf '%sراه‌اندازی سرور خارج (Endpoint)%s\n\n' "$BOLD" "$NC"
-  warn "TrustTunnel به TCP و UDP پورت 443 نیاز دارد."
-  warn "اگر Xray/3x-ui روی 443 است، ابتدا پورت آن را تغییر بدهید؛ اسکریپت آن را قطع نمی‌کند."
+  printf '%sForeign Server Setup (Endpoint)%s\n\n' "$BOLD" "$NC"
+  warn "TrustTunnel requires TCP and UDP port 443."
+  warn "If Xray/3x-ui uses port 443, move it first. This manager will not stop it automatically."
   printf '\n'
 
   domain="$(ask_domain "$DOMAIN")" || return 1
-  cert="$(ask_value "آدرس کامل فایل Full Chain (CRT/PEM)" "$CERT_PATH")" || return 1
-  key="$(ask_value "آدرس کامل فایل Private Key" "$KEY_PATH")" || return 1
+  cert="$(ask_value "Absolute path to the full-chain certificate (CRT/PEM)" "$CERT_PATH")" || return 1
+  key="$(ask_value "Absolute path to the private key" "$KEY_PATH")" || return 1
 
   verify_certificate "$domain" "$cert" "$key" || { pause; return 1; }
   check_domain_dns "$domain" || { pause; return 1; }
 
-  username="$(ask_username "نام کاربری Endpoint" "$ENDPOINT_USERNAME")" || return 1
-  password="$(ask_secret "رمز Endpoint (در صفحه نمایش داده نمی‌شود)")" || return 1
+  username="$(ask_username "Endpoint username" "$ENDPOINT_USERNAME")" || return 1
+  password="$(ask_secret "Endpoint password (input is hidden)")" || return 1
 
   if systemctl is-active --quiet "$ENDPOINT_SERVICE" 2>/dev/null; then
     was_active=1
-    info "برای بازپیکربندی، سرویس فعلی TrustTunnel موقتاً متوقف می‌شود."
+    info "The current TrustTunnel service will be stopped temporarily for reconfiguration."
     systemctl stop "$ENDPOINT_SERVICE" || return 1
   fi
 
@@ -621,7 +621,7 @@ configure_endpoint() {
     return 1
   fi
   if [[ ! -x "$ENDPOINT_DIR/trusttunnel_endpoint" || ! -x "$ENDPOINT_DIR/setup_wizard" ]]; then
-    error "فایل‌های اجرایی Endpoint پس از نصب پیدا نشدند."
+    error "The endpoint executables were not found after installation."
     unset password
     pause
     return 1
@@ -653,17 +653,17 @@ configure_endpoint() {
 
   printf '\n'
   hr
-  ok "راه‌اندازی سرور خارج تمام شد."
-  printf '۱) فایل %s را دانلود کنید.\n' "$ENDPOINT_EXPORT"
-  printf '۲) آن را روی سرور ایران، ترجیحاً داخل /root، آپلود کنید.\n'
-  printf '۳) همین Manager را روی سرور ایران اجرا و گزینه ایران را انتخاب کنید.\n'
+  ok "Foreign endpoint setup is complete."
+  printf '1) Download this file: %s\n' "$ENDPOINT_EXPORT"
+  printf '2) Upload it to the Iran server, preferably under /root.\n'
+  printf '3) Run this manager on the Iran server and select Iran Client.\n'
   pause
 }
 
 find_endpoint_toml() {
   local input path choice i
   local -a files=()
-  input="$(ask_value "مسیر فایل TOML یا پوشه آن" "/root")" || return 1
+  input="$(ask_value "Path to the TOML file or its directory" "/root")" || return 1
   [[ "$input" == "root" ]] && input="/root"
 
   if [[ -f "$input" ]]; then
@@ -672,36 +672,36 @@ find_endpoint_toml() {
     mapfile -t files < <(find "$input" -maxdepth 1 -type f -name '*.toml' \
       ! -name 'trusttunnel_client.toml' -print | sort)
     if [[ ${#files[@]} -eq 0 ]]; then
-      error "هیچ فایل TOML داخل $input پیدا نشد."
+      error "No TOML files were found in $input."
       return 1
     elif [[ ${#files[@]} -eq 1 ]]; then
-      printf 'فایل پیدا شد: %s\n' "${files[0]}" >&2
-      confirm "با همین فایل ادامه بدهم؟" "y" || return 1
+      printf 'Found file: %s\n' "${files[0]}" >&2
+      confirm "Continue with this file?" "y" || return 1
       path="${files[0]}"
     else
-      printf 'فایل‌های TOML پیدا شده:\n' >&2
+      printf 'TOML files found:\n' >&2
       for i in "${!files[@]}"; do
         printf '  %d) %s\n' "$((i+1))" "${files[$i]}" >&2
       done
       while true; do
-        read -r -p "شماره فایل را انتخاب کنید: " choice || return 1
+        read -r -p "Select the file number: " choice || return 1
         if [[ "$choice" =~ ^[0-9]+$ ]] && \
            (( choice >= 1 && choice <= ${#files[@]} )); then
           path="${files[$((choice-1))]}"
           break
         fi
-        warn "انتخاب نامعتبر است."
+        warn "Invalid selection."
       done
     fi
   else
-    error "این مسیر وجود ندارد: $input"
+    error "Path does not exist: $input"
     return 1
   fi
 
   if ! grep -q '^\[endpoint\]' "$path" || \
      ! grep -Eq '^[[:space:]]*hostname[[:space:]]*=' "$path" || \
      ! grep -Eq '^[[:space:]]*addresses[[:space:]]*=' "$path"; then
-    error "فایل انتخاب‌شده شبیه Export معتبر TrustTunnel نیست."
+    error "The selected file does not look like a valid TrustTunnel endpoint export."
     return 1
   fi
   printf '%s' "$path"
@@ -759,7 +759,7 @@ ensure_socks_port_available() {
   [[ -z "$users" ]] && return 0
   other="$(grep -v 'trusttunnel_cli' <<< "$users" || true)"
   if [[ -n "$other" ]]; then
-    error "پورت $port در اختیار برنامه دیگری است:"
+    error "Port $port is being used by another program:"
     printf '%s\n' "$other"
     return 1
   fi
@@ -793,56 +793,56 @@ EOF
 
 start_client() {
   if ! systemctl restart "$CLIENT_SERVICE"; then
-    error "سرویس Client بالا نیامد."
+    error "The client service failed to start."
     systemctl status "$CLIENT_SERVICE" --no-pager -l || true
     return 1
   fi
   sleep 2
   if ! systemctl is-active --quiet "$CLIENT_SERVICE"; then
-    error "سرویس Client فعال نماند."
+    error "The client service did not remain active."
     journalctl -u "$CLIENT_SERVICE" -n 40 --no-pager || true
     return 1
   fi
-  ok "سرویس Client فعال و در شروع سیستم Enabled است."
+  ok "The client service is active and enabled at boot."
 }
 
 test_socks() {
   local address="$1" port="$2" username="$3" password="$4" exit_ip
   if ! port_listener "$port" | grep -q 'trusttunnel_cli'; then
-    error "SOCKS روی $address:$port در حال Listen نیست."
+    error "SOCKS is not listening on $address:$port."
     return 1
   fi
-  ok "SOCKS5 روی $address:$port در حال Listen است."
+  ok "SOCKS5 is listening on $address:$port."
   exit_ip="$(curl -4 -fsS --max-time 15 \
     --socks5-hostname "$address:$port" \
     --proxy-user "$username:$password" \
     https://api.ipify.org 2>/dev/null || true)"
   if [[ -n "$exit_ip" ]]; then
-    ok "تست عبور از تونل موفق بود؛ IP خروجی: $exit_ip"
+    ok "Tunnel proxy test passed. Exit IP: $exit_ip"
   else
-    warn "Listener فعال است اما تست اینترنت از SOCKS پاسخ نگرفت. لاگ Client را ببینید."
+    warn "The listener is active, but the SOCKS Internet test failed. Check the client logs."
     return 1
   fi
 }
 
 choose_client_mode() {
   local choice
-  printf '\nحالت Client روی سرور ایران:\n' >&2
-  printf '  1) SOCKS5 Proxy (پیشنهادی برای 3x-ui؛ Route سرور عوض نمی‌شود)\n' >&2
-  printf '  2) TUN (Route/DNS سیستم را تغییر می‌دهد و ممکن است روی SSH و سرویس‌ها اثر بگذارد)\n' >&2
+  printf '\nClient mode on the Iran server:\n' >&2
+  printf '  1) SOCKS5 Proxy (recommended for 3x-ui; does not change server routes)\n' >&2
+  printf '  2) TUN (changes system routes/DNS and may affect SSH and other services)\n' >&2
   while true; do
-    read -r -p "انتخاب [1]: " choice || return 1
+    read -r -p "Select [1]: " choice || return 1
     choice="${choice:-1}"
     case "$choice" in
       1) printf 'socks'; return 0 ;;
       2)
-        warn "TUN می‌تواند مسیر اینترنت کل سرور ایران را تغییر دهد."
-        confirm "با آگاهی از این موضوع TUN را انتخاب می‌کنید؟" "n" && {
+        warn "TUN may change the Internet route of the entire Iran server."
+        confirm "Do you understand the risk and still want to use TUN?" "n" && {
           printf 'tun'
           return 0
         }
         ;;
-      *) warn "گزینه معتبر نیست." ;;
+      *) warn "Invalid option." ;;
     esac
   done
 }
@@ -855,14 +855,14 @@ configure_client() {
   local wizard_log="$STATE_DIR/client-wizard.log"
 
   banner
-  printf '%sراه‌اندازی سرور ایران (Client)%s\n\n' "$BOLD" "$NC"
+  printf '%sIran Server Setup (Client)%s\n\n' "$BOLD" "$NC"
   endpoint_file="$(find_endpoint_toml)" || { pause; return 1; }
   mode="$(choose_client_mode)" || return 1
 
   if [[ "$mode" == "socks" ]]; then
-    socks_port="$(ask_port "پورت محلی SOCKS5" "${SOCKS_PORT:-27831}")" || return 1
-    socks_user="$(ask_username "نام کاربری SOCKS5" "$SOCKS_USERNAME")" || return 1
-    socks_password="$(ask_secret "رمز SOCKS5 (مستقل از رمز Endpoint)")" || return 1
+    socks_port="$(ask_port "Local SOCKS5 port" "${SOCKS_PORT:-27831}")" || return 1
+    socks_user="$(ask_username "SOCKS5 username" "$SOCKS_USERNAME")" || return 1
+    socks_password="$(ask_secret "SOCKS5 password (independent from endpoint credentials)")" || return 1
     if ! ensure_socks_port_available "$socks_port"; then
       unset socks_password
       pause
@@ -877,7 +877,7 @@ configure_client() {
     return 1
   fi
   if [[ ! -x "$CLIENT_DIR/trusttunnel_client" || ! -x "$CLIENT_DIR/setup_wizard" ]]; then
-    error "فایل‌های اجرایی Client پس از نصب پیدا نشدند."
+    error "The client executables were not found after installation."
     unset socks_password
     pause
     return 1
@@ -891,14 +891,14 @@ configure_client() {
       --endpoint_config "$imported" \
       --settings "$generated"
   ) > "$wizard_log" 2>&1; then
-    error "فایل Endpoint وارد نشد."
+    error "The endpoint export file could not be imported."
     tail -n 20 "$wizard_log" 2>/dev/null || true
     unset socks_password
     pause
     return 1
   fi
   if [[ ! -s "$generated" ]] || ! grep -q '^\[endpoint\]' "$generated"; then
-    error "Wizard فایل تنظیمات Client معتبر نساخت."
+    error "The setup wizard did not create a valid client configuration."
     unset socks_password
     pause
     return 1
@@ -942,25 +942,25 @@ configure_client() {
     test_socks "127.0.0.1" "$socks_port" "$socks_user" "$socks_password" || true
     unset socks_password
     hr
-    ok "راه‌اندازی SOCKS روی سرور ایران تمام شد."
-    printf 'تنظیم Outbound در 3x-ui:\n'
+    ok "SOCKS setup on the Iran server is complete."
+    printf '3x-ui Outbound settings:\n'
     printf '  Protocol: SOCKS\n'
     printf '  Address : 127.0.0.1\n'
     printf '  Port    : %s\n' "$socks_port"
     printf '  Username: %s\n' "$socks_user"
-    printf '  Password: همان رمز SOCKS که همین‌جا وارد کردید\n'
-    printf 'این Listener فقط روی Loopback است و از اینترنت قابل استفاده نیست.\n'
+    printf '  Password: use the SOCKS password entered during setup\n'
+    printf 'This listener is bound to loopback only and is not reachable from the Internet.\n'
   else
     hr
-    ok "راه‌اندازی TUN روی سرور ایران تمام شد."
-    warn "در این حالت Route سیستم توسط TrustTunnel مدیریت می‌شود."
+    ok "TUN setup on the Iran server is complete."
+    warn "In this mode, TrustTunnel manages the system routes."
   fi
   pause
 }
 
 show_status() {
   banner
-  printf '%sوضعیت سرویس‌ها%s\n\n' "$BOLD" "$NC"
+  printf '%sService Status%s\n\n' "$BOLD" "$NC"
   if systemctl cat "$ENDPOINT_SERVICE" >/dev/null 2>&1; then
     printf 'Endpoint: %s / %s\n' \
       "$(systemctl is-active "$ENDPOINT_SERVICE" 2>/dev/null || true)" \
@@ -979,7 +979,7 @@ show_status() {
   fi
   if ! systemctl cat "$ENDPOINT_SERVICE" >/dev/null 2>&1 && \
      ! systemctl cat "$CLIENT_SERVICE" >/dev/null 2>&1; then
-    warn "هیچ سرویس مدیریت‌شده‌ای پیدا نشد."
+    warn "No managed TrustTunnel services were found."
   fi
   pause
 }
@@ -992,12 +992,12 @@ show_logs() {
     service="$CLIENT_SERVICE"
   else
     printf '1) Endpoint\n2) Client\n'
-    read -r -p "انتخاب: " choice || return 1
+    read -r -p "Select: " choice || return 1
     [[ "$choice" == "1" ]] && service="$ENDPOINT_SERVICE" || service="$CLIENT_SERVICE"
   fi
   banner
-  printf '1) 80 خط آخر\n2) نمایش زنده (خروج با Ctrl+C)\n'
-  read -r -p "انتخاب [1]: " choice || return 1
+  printf '1) Last 80 lines\n2) Follow live logs (exit with Ctrl+C)\n'
+  read -r -p "Select [1]: " choice || return 1
   choice="${choice:-1}"
   if [[ "$choice" == "2" ]]; then
     journalctl -u "$service" -f --no-pager || true
@@ -1011,10 +1011,10 @@ restart_role_service() {
   local service
   [[ "$ROLE" == "foreign" ]] && service="$ENDPOINT_SERVICE" || service="$CLIENT_SERVICE"
   if systemctl restart "$service"; then
-    ok "سرویس Restart شد."
+    ok "The service was restarted."
     systemctl status "$service" --no-pager -l | head -n 15
   else
-    error "Restart ناموفق بود."
+    error "Service restart failed."
     journalctl -u "$service" -n 30 --no-pager || true
   fi
   pause
@@ -1029,16 +1029,16 @@ update_core() {
     service="$CLIENT_SERVICE" url="$CLIENT_INSTALL_URL" label="Client"
     backup_client
   else
-    error "نقش سرور مشخص نیست."
+    error "The server role is not configured."
     pause
     return 1
   fi
   systemctl stop "$service" >/dev/null 2>&1 || true
   if download_and_run_installer "$url" "TrustTunnel $label"; then
     systemctl start "$service" || true
-    ok "هسته TrustTunnel به‌روزرسانی شد."
+    ok "TrustTunnel core was updated."
   else
-    error "به‌روزرسانی ناموفق بود."
+    error "The update failed."
     systemctl start "$service" >/dev/null 2>&1 || true
   fi
   pause
@@ -1047,18 +1047,18 @@ update_core() {
 uninstall_role() {
   local backup role_label
   banner
-  if [[ "$ROLE" == "foreign" ]]; then role_label="Endpoint خارج"; else role_label="Client ایران"; fi
-  warn "این عملیات سرویس و فایل‌های نصب‌شده $role_label را حذف می‌کند."
-  warn "گواهی و کلید خارج از /opt حذف نمی‌شوند."
-  confirm "قبل از حذف، بکاپ تنظیمات در $BACKUP_DIR بسازم؟" "y" && backup=1 || backup=0
-  confirm "از حذف مطمئن هستید؟" "n" || return 0
+  if [[ "$ROLE" == "foreign" ]]; then role_label="Foreign Endpoint"; else role_label="Iran Client"; fi
+  warn "This operation removes the installed $role_label service and files."
+  warn "Certificates and keys stored outside /opt will not be removed."
+  confirm "Create a configuration backup in $BACKUP_DIR before removal?" "y" && backup=1 || backup=0
+  confirm "Are you sure you want to remove it?" "n" || return 0
 
   if [[ "$ROLE" == "foreign" ]]; then
     (( backup == 1 )) && backup_endpoint
     systemctl disable --now "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
     rm -f "$ENDPOINT_UNIT"
     rm -rf "$ENDPOINT_DIR"
-    if [[ -f "$ENDPOINT_EXPORT" ]] && confirm "فایل خروجی محرمانه $ENDPOINT_EXPORT هم حذف شود؟" "y"; then
+    if [[ -f "$ENDPOINT_EXPORT" ]] && confirm "Also remove the secret export file $ENDPOINT_EXPORT?" "y"; then
       rm -f "$ENDPOINT_EXPORT"
     fi
   elif [[ "$ROLE" == "iran" ]]; then
@@ -1067,31 +1067,31 @@ uninstall_role() {
     rm -f "$CLIENT_UNIT"
     rm -rf "$CLIENT_DIR"
   else
-    error "نقش سرور مشخص نیست."
+    error "The server role is not configured."
     pause
     return 1
   fi
   systemctl daemon-reload
   rm -f "$STATE_FILE"
   ROLE=""
-  ok "حذف انجام شد. در صورت انتخاب بکاپ، اطلاعات قابل بازیابی است."
+  ok "Removal completed. If a backup was selected, the configuration can be recovered."
   pause
 }
 
 choose_initial_role() {
   local choice
   banner
-  printf 'این سرور کدام است؟\n\n'
-  printf '  1) خارج — نصب TrustTunnel Endpoint\n'
-  printf '  2) ایران — نصب TrustTunnel Client\n'
-  printf '  0) خروج\n\n'
+  printf 'Which server is this?\n\n'
+  printf '  1) Foreign server - Install TrustTunnel Endpoint\n'
+  printf '  2) Iran server    - Install TrustTunnel Client\n'
+  printf '  0) Exit\n\n'
   while true; do
-    read -r -p "انتخاب: " choice || exit 0
+    read -r -p "Select: " choice || exit 0
     case "$choice" in
       1) configure_endpoint; return ;;
       2) configure_client; return ;;
       0) exit 0 ;;
-      *) warn "گزینه معتبر نیست." ;;
+      *) warn "Invalid option." ;;
     esac
   done
 }
@@ -1100,22 +1100,22 @@ main_menu() {
   local choice role_name
   while true; do
     [[ -z "$ROLE" ]] && { choose_initial_role; load_state; }
-    [[ "$ROLE" == "foreign" ]] && role_name="خارج / Endpoint" || role_name="ایران / Client"
+    [[ "$ROLE" == "foreign" ]] && role_name="Foreign / Endpoint" || role_name="Iran / Client"
     banner
-    printf 'نقش فعلی: %s%s%s\n\n' "$GREEN" "$role_name" "$NC"
-    printf '  1) وضعیت سرویس\n'
-    printf '  2) مشاهده لاگ\n'
-    printf '  3) Restart سرویس\n'
-    printf '  4) ویرایش / پیکربندی مجدد\n'
+    printf 'Current role: %s%s%s\n\n' "$GREEN" "$role_name" "$NC"
+    printf '  1) Service status\n'
+    printf '  2) View logs\n'
+    printf '  3) Restart service\n'
+    printf '  4) Edit / reconfigure\n'
     if [[ "$ROLE" == "foreign" ]]; then
-      printf '  5) ساخت دوباره فایل TOML برای ایران\n'
+      printf '  5) Regenerate Iran client TOML export\n'
     else
-      printf '  5) نمایش تنظیمات SOCKS برای 3x-ui\n'
+      printf '  5) Show SOCKS settings for 3x-ui\n'
     fi
-    printf '  6) به‌روزرسانی هسته TrustTunnel\n'
-    printf '  7) حذف TrustTunnel این سرور\n'
-    printf '  0) خروج\n\n'
-    read -r -p "انتخاب: " choice || exit 0
+    printf '  6) Update TrustTunnel core\n'
+    printf '  7) Remove TrustTunnel from this server\n'
+    printf '  0) Exit\n\n'
+    read -r -p "Select: " choice || exit 0
     case "$choice" in
       1) show_status ;;
       2) show_logs ;;
@@ -1131,9 +1131,9 @@ main_menu() {
           if [[ "$CLIENT_MODE" == "socks" ]]; then
             printf 'Protocol: SOCKS\nAddress : %s\nPort    : %s\nUsername: %s\n' \
               "$SOCKS_ADDRESS" "$SOCKS_PORT" "$SOCKS_USERNAME"
-            printf 'Password: همان رمز SOCKS واردشده هنگام نصب\n'
+            printf 'Password: use the SOCKS password entered during setup\n'
           else
-            warn "Client در حالت TUN است و SOCKS Listener ندارد."
+            warn "The client is in TUN mode and has no SOCKS listener."
           fi
           pause
         fi
@@ -1141,7 +1141,7 @@ main_menu() {
       6) update_core ;;
       7) uninstall_role ;;
       0) exit 0 ;;
-      *) warn "گزینه معتبر نیست."; sleep 1 ;;
+      *) warn "Invalid option."; sleep 1 ;;
     esac
   done
 }

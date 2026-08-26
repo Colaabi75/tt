@@ -9,7 +9,7 @@ set -uo pipefail
 IFS=$'\n\t'
 
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.3.1"
+APP_VERSION="0.4.0"
 INSTALL_PATH="/usr/local/bin/trusttunnel-manager"
 STATE_DIR="/etc/trusttunnel-manager"
 STATE_FILE="$STATE_DIR/state.env"
@@ -1176,7 +1176,7 @@ configure_endpoint() {
     account_count="$(tr ',' '\n' <<< "$existing_users" | sed '/^$/d' | wc -l)"
     if (( account_count > 0 )); then
       warn "A full Endpoint reconfiguration replaces all $account_count existing client account(s)."
-      warn "To add, remove, or export an account without rebuilding the Endpoint, use its Manage menu."
+      warn "To keep the Endpoint and add another Iran server, use Foreign Endpoint > Add New Authenticated Client."
       confirm "Continue with full Endpoint reconfiguration?" "n" || return 0
     fi
   fi
@@ -1929,6 +1929,69 @@ print_discovered_list() {
   done
 }
 
+role_installation_count() {
+  local wanted_role="$1" i count=0
+  for ((i=0; i<DISC_COUNT; i++)); do
+    [[ "${DISC_ROLE[$i]:-}" == "$wanted_role" ]] && count=$((count + 1))
+  done
+  printf '%d' "$count"
+}
+
+print_role_installations() {
+  local wanted_role="$1" i number=0 service state credentials users account_count address
+  for ((i=0; i<DISC_COUNT; i++)); do
+    [[ "${DISC_ROLE[$i]:-}" == "$wanted_role" ]] || continue
+    number=$((number + 1))
+    service="${DISC_SERVICE[$i]:-${DISC_SOURCE[$i]:-unmanaged}}"
+    state="$(instance_service_state "$i")"
+    if [[ "$wanted_role" == "endpoint" ]]; then
+      credentials="$(instance_endpoint_credentials_file "$i")"
+      users="$(toml_client_usernames "$credentials")"
+      account_count="$(tr ',' '\n' <<< "$users" | sed '/^$/d' | wc -l)"
+      printf '  %d) %-12s | %s | clients: %s | %s\n' \
+        "$number" "$state" "$(instance_summary "$i")" "$account_count" "$service"
+    else
+      address="$(toml_get "${DISC_PRIMARY[$i]:-}" "listener.socks" "address" 2>/dev/null || true)"
+      [[ -n "$address" ]] || address="system routing"
+      printf '  %d) %-12s | %s | %s | %s\n' \
+        "$number" "$state" "$(instance_summary "$i")" "$address" "$service"
+    fi
+  done
+  if (( number == 0 )); then
+    if [[ "$wanted_role" == "endpoint" ]]; then
+      printf '  No Foreign Endpoint was detected.\n'
+    else
+      printf '  No Iran Client connection was detected.\n'
+    fi
+  fi
+}
+
+select_role_instance_index() {
+  local wanted_role="$1" prompt_label="$2" choice i
+  local -a indices=()
+  for ((i=0; i<DISC_COUNT; i++)); do
+    [[ "${DISC_ROLE[$i]:-}" == "$wanted_role" ]] && indices+=("$i")
+  done
+  if (( ${#indices[@]} == 0 )); then
+    error "No $prompt_label was detected."
+    return 1
+  fi
+  if (( ${#indices[@]} == 1 )); then
+    printf '%s' "${indices[0]}"
+    return 0
+  fi
+  printf 'Select %s:\n' "$prompt_label" >&2
+  print_role_installations "$wanted_role" >&2
+  while true; do
+    read -r -p "Select: " choice || return 1
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#indices[@]} )); then
+      printf '%s' "${indices[$((choice-1))]}"
+      return 0
+    fi
+    warn "Invalid selection."
+  done
+}
+
 show_instance_details() {
   local index="$1" role service pid binary primary secondary workdir source version=""
   local listen private domain cert key credentials rules users endpoint_address endpoint_user
@@ -2503,6 +2566,96 @@ manage_discovered_installations() {
   done
 }
 
+foreign_endpoint_menu() {
+  local choice endpoint_count index
+  while true; do
+    discover_installations
+    endpoint_count="$(role_installation_count endpoint)"
+    banner
+    printf '%sForeign Endpoint%s\n\n' "$BOLD" "$NC"
+    print_role_installations endpoint
+    printf '\n'
+    if (( endpoint_count == 0 )); then
+      printf '  1) Install Foreign Endpoint\n'
+    else
+      printf '  1) Add New Authenticated Client\n'
+      printf '  2) Manage Client Accounts and Exports\n'
+      printf '  3) Manage Endpoint Service and Configuration\n'
+      printf '  4) Reconfigure Endpoint (replaces all client accounts)\n'
+    fi
+    printf '  0) Back\n\n'
+    read -r -p "Select: " choice || return 0
+
+    if (( endpoint_count == 0 )); then
+      case "$choice" in
+        1) configure_endpoint ;;
+        0) return 0 ;;
+        *) warn "Invalid option."; sleep 1 ;;
+      esac
+      continue
+    fi
+
+    case "$choice" in
+      1)
+        index="$(select_role_instance_index endpoint "Foreign Endpoint")" || { pause; continue; }
+        add_endpoint_client_account "$index"
+        ;;
+      2)
+        index="$(select_role_instance_index endpoint "Foreign Endpoint")" || { pause; continue; }
+        manage_endpoint_client_accounts "$index"
+        ;;
+      3)
+        index="$(select_role_instance_index endpoint "Foreign Endpoint")" || { pause; continue; }
+        manage_discovered_instance "$index"
+        ;;
+      4) configure_endpoint ;;
+      0) return 0 ;;
+      *) warn "Invalid option."; sleep 1 ;;
+    esac
+  done
+}
+
+iran_client_connections_menu() {
+  local choice client_count index
+  while true; do
+    discover_installations
+    client_count="$(role_installation_count client)"
+    banner
+    printf '%sIran Client Connections%s\n\n' "$BOLD" "$NC"
+    print_role_installations client
+    printf '\nEach connection has its own configuration, systemd service, and local SOCKS port.\n\n'
+    printf '  1) Add New Foreign Server Connection\n'
+    if (( client_count > 0 )); then
+      printf '  2) Manage Existing Connection\n'
+    fi
+    printf '  0) Back\n\n'
+    read -r -p "Select: " choice || return 0
+    case "$choice" in
+      1) configure_client_profile ;;
+      2)
+        if (( client_count == 0 )); then
+          warn "Invalid option."
+          sleep 1
+          continue
+        fi
+        index="$(select_role_instance_index client "Iran Client connection")" || { pause; continue; }
+        manage_discovered_instance "$index"
+        ;;
+      0) return 0 ;;
+      *) warn "Invalid option."; sleep 1 ;;
+    esac
+  done
+}
+
+list_manager_backups() {
+  banner
+  printf '%sManager Backups%s\n\n' "$BOLD" "$NC"
+  printf 'Backup directory: %s\n\n' "$BACKUP_DIR"
+  find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '  %TY-%Tm-%Td %TH:%TM  %f\n' \
+    2>/dev/null | sort -r || true
+  pause
+}
+
 show_status() {
   banner
   printf '%sService Status%s\n\n' "$BOLD" "$NC"
@@ -2642,7 +2795,7 @@ choose_initial_role() {
 }
 
 main_menu() {
-  local choice first_run=1
+  local choice first_run=1 endpoint_count client_count
   while true; do
     discover_installations
     if (( first_run == 1 && DISC_COUNT == 0 )) && [[ -z "$ROLE" ]]; then
@@ -2652,27 +2805,22 @@ main_menu() {
       continue
     fi
     first_run=0
+    endpoint_count="$(role_installation_count endpoint)"
+    client_count="$(role_installation_count client)"
     banner
-    printf 'Detected installations: %s%d%s\n\n' "$GREEN" "$DISC_COUNT" "$NC"
-    print_discovered_list
-    printf '\n'
-    printf '  1) View and manage detected installations\n'
-    printf '  2) Install or reconfigure Foreign Endpoint\n'
-    printf '  3) Add or reconfigure Iran Client profile\n'
-    printf '  4) List manager backups\n'
+    printf 'Foreign Endpoints: %s%s%s | Iran connections: %s%s%s\n\n' \
+      "$GREEN" "$endpoint_count" "$NC" "$GREEN" "$client_count" "$NC"
+    printf '  1) Foreign Endpoint\n'
+    printf '  2) Iran Client Connections\n'
+    printf '  3) View All Detected Installations\n'
+    printf '  4) Manager Backups\n'
     printf '  0) Exit\n\n'
     read -r -p "Select: " choice || exit 0
     case "$choice" in
-      1) manage_discovered_installations ;;
-      2) configure_endpoint ;;
-      3) configure_client_profile ;;
-      4)
-        banner
-        printf 'Backup directory: %s\n\n' "$BACKUP_DIR"
-        find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '  %TY-%Tm-%Td %TH:%TM  %f\n' \
-          2>/dev/null | sort -r || true
-        pause
-        ;;
+      1) foreign_endpoint_menu ;;
+      2) iran_client_connections_menu ;;
+      3) manage_discovered_installations ;;
+      4) list_manager_backups ;;
       0) exit 0 ;;
       *) warn "Invalid option."; sleep 1 ;;
     esac

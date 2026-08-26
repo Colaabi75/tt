@@ -9,7 +9,7 @@ set -uo pipefail
 IFS=$'\n\t'
 
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.4.0"
+APP_VERSION="0.4.1"
 INSTALL_PATH="/usr/local/bin/trusttunnel-manager"
 STATE_DIR="/etc/trusttunnel-manager"
 STATE_FILE="$STATE_DIR/state.env"
@@ -872,6 +872,42 @@ test_endpoint_tls() {
   return 1
 }
 
+validate_client_export() {
+  local file="$1" expected_username="${2:-}" section=""
+  local hostname addresses username password
+  local -a missing=()
+  [[ -s "$file" ]] || {
+    error "The Endpoint returned an empty client export."
+    return 1
+  }
+  if grep -Eq '^[[:space:]]*tt://' "$file"; then
+    error "The Endpoint returned a deep link instead of TOML. Check Endpoint support for --format toml."
+    return 1
+  fi
+
+  # Current Endpoint releases export flat TOML. Older or converted files may
+  # use an [endpoint] section, so accept both layouts.
+  toml_has_section "$file" "endpoint" && section="endpoint"
+  hostname="$(toml_get "$file" "$section" "hostname" 2>/dev/null || true)"
+  addresses="$(toml_get "$file" "$section" "addresses" 2>/dev/null || true)"
+  username="$(toml_get "$file" "$section" "username" 2>/dev/null || true)"
+  password="$(toml_get "$file" "$section" "password" 2>/dev/null || true)"
+
+  [[ -n "$hostname" ]] || missing+=(hostname)
+  [[ -n "$addresses" && "$addresses" != "[]" ]] || missing+=(addresses)
+  [[ -n "$username" ]] || missing+=(username)
+  [[ -n "$password" ]] || missing+=(password)
+  if (( ${#missing[@]} > 0 )); then
+    error "The generated client TOML is missing required field(s): ${missing[*]}."
+    return 1
+  fi
+  if [[ -n "$expected_username" && "$username" != "$expected_username" ]]; then
+    error "The generated client TOML belongs to a different Endpoint username."
+    return 1
+  fi
+  return 0
+}
+
 export_client_toml() {
   local username="${1:-$ENDPOINT_USERNAME}" tmp
   [[ -x "$ENDPOINT_DIR/trusttunnel_endpoint" ]] || {
@@ -896,8 +932,8 @@ export_client_toml() {
     rm -f "$tmp"
     return 1
   fi
-  if ! grep -q '^\[endpoint\]' "$tmp"; then
-    error "The endpoint output is not a valid client TOML file."
+  if ! validate_client_export "$tmp" "$username"; then
+    error "The Endpoint output could not be accepted as a client TOML file."
     rm -f "$tmp"
     return 1
   fi
@@ -1124,9 +1160,9 @@ export_instance_client_toml() {
     error "Could not export a TOML file for $username."
     return 1
   fi
-  if ! grep -q '^\[endpoint\]' "$tmp"; then
+  if ! validate_client_export "$tmp" "$username"; then
     rm -f "$tmp"
-    error "The generated client export is invalid."
+    error "The generated client export could not be accepted."
     return 1
   fi
   install -m 0600 "$tmp" "$output"
@@ -1290,9 +1326,7 @@ find_endpoint_toml() {
     return 1
   fi
 
-  if ! grep -q '^\[endpoint\]' "$path" || \
-     ! grep -Eq '^[[:space:]]*hostname[[:space:]]*=' "$path" || \
-     ! grep -Eq '^[[:space:]]*addresses[[:space:]]*=' "$path"; then
+  if ! validate_client_export "$path"; then
     error "The selected file does not look like a valid TrustTunnel endpoint export."
     return 1
   fi
@@ -2491,7 +2525,7 @@ manage_discovered_instance() {
     printf '  3) View logs\n'
     printf '  4) Restart service\n'
     printf '  5) Edit configuration\n'
-    printf '  6) Create backup\n'
+    printf '  6) Create Configuration Backup\n'
     printf '  7) Update TrustTunnel core\n'
     printf '  8) Remove this instance\n'
     if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
@@ -2650,6 +2684,12 @@ iran_client_connections_menu() {
 list_manager_backups() {
   banner
   printf '%sManager Backups%s\n\n' "$BOLD" "$NC"
+  printf 'Purpose: protect TrustTunnel configuration before edits, updates, or removal.\n'
+  printf 'Contents: TOML configuration, the related systemd unit, and inventory metadata.\n'
+  printf 'Excluded: binaries, traffic, logs, external certificates/keys, and other server files.\n'
+  printf 'Security: backups can contain passwords and are readable by root only.\n'
+  printf 'Recovery: failed profile reconfiguration is rolled back automatically.\n'
+  printf 'Manual restore is not automated; keep the matching backup directory for recovery.\n\n'
   printf 'Backup directory: %s\n\n' "$BACKUP_DIR"
   find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '  %TY-%Tm-%Td %TH:%TM  %f\n' \
     2>/dev/null | sort -r || true
@@ -2813,7 +2853,7 @@ main_menu() {
     printf '  1) Foreign Endpoint\n'
     printf '  2) Iran Client Connections\n'
     printf '  3) View All Detected Installations\n'
-    printf '  4) Manager Backups\n'
+    printf '  4) Backup Information and Files\n'
     printf '  0) Exit\n\n'
     read -r -p "Select: " choice || exit 0
     case "$choice" in

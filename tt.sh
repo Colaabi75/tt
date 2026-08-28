@@ -9,7 +9,7 @@ set -uo pipefail
 IFS=$'\n\t'
 
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.4.1"
+APP_VERSION="0.4.2"
 INSTALL_PATH="/usr/local/bin/trusttunnel-manager"
 STATE_DIR="/etc/trusttunnel-manager"
 STATE_FILE="$STATE_DIR/state.env"
@@ -35,6 +35,7 @@ ROLE=""
 DOMAIN=""
 CERT_PATH=""
 KEY_PATH=""
+ENDPOINT_PORT="443"
 ENDPOINT_USERNAME=""
 CLIENT_MODE=""
 SOCKS_ADDRESS="127.0.0.1"
@@ -227,6 +228,135 @@ ask_port() {
   done
 }
 
+certificate_key_match() {
+  local cert="$1" key="$2" cert_fp key_fp
+  cert_fp="$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | \
+    openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null)"
+  key_fp="$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | \
+    openssl dgst -sha256 2>/dev/null)"
+  [[ -n "$cert_fp" && "$cert_fp" == "$key_fp" ]]
+}
+
+select_certificate_path() {
+  local domain="$1" input="$2" file choice i
+  local -a valid=() matching=() candidates=()
+  [[ "$input" == "root" ]] && input="/root"
+  input="$(normalize_path "$input" "/")"
+
+  if [[ -f "$input" ]]; then
+    if openssl x509 -in "$input" -noout >/dev/null 2>&1; then
+      printf '%s' "$input"
+      return 0
+    fi
+    error "The selected file is not a readable X.509 certificate: $input"
+    return 1
+  fi
+  if [[ ! -d "$input" ]]; then
+    error "Certificate path does not exist: $input"
+    return 1
+  fi
+
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    if openssl x509 -in "$file" -noout >/dev/null 2>&1; then
+      valid+=("$file")
+      if openssl x509 -in "$file" -noout -checkhost "$domain" >/dev/null 2>&1; then
+        matching+=("$file")
+      fi
+    fi
+  done < <(find "$input" -maxdepth 1 -type f \
+    \( -iname '*.crt' -o -iname '*.pem' -o -iname '*.cer' \) -print 2>/dev/null | sort)
+
+  if (( ${#matching[@]} > 0 )); then candidates=("${matching[@]}"); else candidates=("${valid[@]}"); fi
+  if (( ${#candidates[@]} == 0 )); then
+    error "No valid certificate file (.crt/.pem/.cer) was found in $input."
+    return 1
+  fi
+  if (( ${#candidates[@]} == 1 )); then
+    printf 'Detected certificate: %s\n' "${candidates[0]}" >&2
+    printf '%s' "${candidates[0]}"
+    return 0
+  fi
+
+  printf 'Certificate files found in %s:\n' "$input" >&2
+  for i in "${!candidates[@]}"; do
+    printf '  %d) %s\n' "$((i+1))" "${candidates[$i]}" >&2
+  done
+  while true; do
+    read -r -p "Select the certificate file: " choice || return 1
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#candidates[@]} )); then
+      printf '%s' "${candidates[$((choice-1))]}"
+      return 0
+    fi
+    warn "Invalid selection."
+  done
+}
+
+select_private_key_path() {
+  local cert="$1" input="$2" file choice i
+  local -a valid=() matching=() candidates=()
+  [[ "$input" == "root" ]] && input="/root"
+  input="$(normalize_path "$input" "/")"
+
+  if [[ -f "$input" ]]; then
+    if openssl pkey -in "$input" -noout >/dev/null 2>&1; then
+      printf '%s' "$input"
+      return 0
+    fi
+    error "The selected file is not a readable unencrypted private key: $input"
+    return 1
+  fi
+  if [[ ! -d "$input" ]]; then
+    error "Private-key path does not exist: $input"
+    return 1
+  fi
+
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    if openssl pkey -in "$file" -noout >/dev/null 2>&1; then
+      valid+=("$file")
+      certificate_key_match "$cert" "$file" && matching+=("$file")
+    fi
+  done < <(find "$input" -maxdepth 1 -type f \
+    \( -iname '*.key' -o -iname '*.pem' \) -print 2>/dev/null | sort)
+
+  if (( ${#matching[@]} > 0 )); then candidates=("${matching[@]}"); else candidates=("${valid[@]}"); fi
+  if (( ${#candidates[@]} == 0 )); then
+    error "No valid private-key file (.key/.pem) was found in $input."
+    return 1
+  fi
+  if (( ${#candidates[@]} == 1 )); then
+    printf 'Detected private key: %s\n' "${candidates[0]}" >&2
+    printf '%s' "${candidates[0]}"
+    return 0
+  fi
+
+  printf 'Private-key files found in %s:\n' "$input" >&2
+  for i in "${!candidates[@]}"; do
+    printf '  %d) %s\n' "$((i+1))" "${candidates[$i]}" >&2
+  done
+  while true; do
+    read -r -p "Select the private-key file: " choice || return 1
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#candidates[@]} )); then
+      printf '%s' "${candidates[$((choice-1))]}"
+      return 0
+    fi
+    warn "Invalid selection."
+  done
+}
+
+ask_certificate_path() {
+  local domain="$1" default="${2:-/root}" input
+  input="$(ask_value "Certificate file or directory (.crt/.pem)" "$default")" || return 1
+  select_certificate_path "$domain" "$input"
+}
+
+ask_private_key_path() {
+  local cert="$1" default="${2:-$(dirname "$cert")}" input
+  input="$(ask_value "Private-key file or directory (.key/.pem)" "$default")" || return 1
+  select_private_key_path "$cert" "$input"
+}
+
 toml_escape() {
   local value="$1"
   value=${value//\\/\\\\}
@@ -249,6 +379,7 @@ save_state() {
     printf 'DOMAIN=%q\n' "$DOMAIN"
     printf 'CERT_PATH=%q\n' "$CERT_PATH"
     printf 'KEY_PATH=%q\n' "$KEY_PATH"
+    printf 'ENDPOINT_PORT=%q\n' "$ENDPOINT_PORT"
     printf 'ENDPOINT_USERNAME=%q\n' "$ENDPOINT_USERNAME"
     printf 'CLIENT_MODE=%q\n' "$CLIENT_MODE"
     printf 'SOCKS_ADDRESS=%q\n' "$SOCKS_ADDRESS"
@@ -712,22 +843,65 @@ check_domain_dns() {
   return 0
 }
 
-port_443_users() {
-  ss -H -lntup 2>/dev/null | grep -E ':(443)([[:space:]]|$)' || true
+endpoint_port_users() {
+  local port="$1"
+  ss -H -lntup 2>/dev/null | grep -E ":(${port})([[:space:]]|$)" || true
+}
+
+endpoint_port_is_free() {
+  [[ -z "$(endpoint_port_users "$1")" ]]
+}
+
+suggest_endpoint_ports() {
+  local port
+  local -a candidates=(443 8443 9443 10443 12443 14443)
+  for port in "${candidates[@]}"; do
+    endpoint_port_is_free "$port" && printf '%s\n' "$port"
+  done
+}
+
+choose_endpoint_port() {
+  local preferred="${1:-443}" users choice default
+  local -a suggestions=()
+  valid_port "$preferred" || preferred="443"
+  if endpoint_port_is_free "$preferred"; then
+    printf '%s' "$preferred"
+    return 0
+  fi
+
+  users="$(endpoint_port_users "$preferred")"
+  error "TCP or UDP port $preferred is already in use:" >&2
+  printf '%s\n' "$users" >&2
+  warn "The manager will not stop Xray/3x-ui or another service automatically." >&2
+
+  mapfile -t suggestions < <(suggest_endpoint_ports)
+  if (( ${#suggestions[@]} > 0 )); then
+    printf 'Suggested free endpoint ports: %s\n' "$(printf '%s ' "${suggestions[@]}")" >&2
+    default="${suggestions[0]}"
+  else
+    default="9443"
+  fi
+
+  while true; do
+    choice="$(ask_port "Endpoint TLS port" "$default")" || return 1
+    if endpoint_port_is_free "$choice"; then
+      printf '%s' "$choice"
+      return 0
+    fi
+    error "Port $choice is also in use:" >&2
+    endpoint_port_users "$choice" >&2
+  done
 }
 
 ensure_endpoint_port_free() {
-  local users
-  users="$(port_443_users)"
+  local port="${1:-443}" users
+  users="$(endpoint_port_users "$port")"
   if [[ -n "$users" ]]; then
-    error "TCP or UDP port 443 is already in use:"
+    error "TCP or UDP port $port is already in use:"
     printf '%s\n' "$users"
-    printf '\n'
-    error "Stop the listed service manually or move it to another port."
-    error "To avoid disrupting 3x-ui/Xray, this manager will not stop it automatically."
     return 1
   fi
-  ok "TCP and UDP port 443 are free."
+  ok "TCP and UDP port $port are free."
 }
 
 write_endpoint_hosts() {
@@ -752,7 +926,7 @@ write_endpoint_credentials() {
 }
 
 generate_endpoint_config() {
-  local domain="$1" cert="$2" key="$3" username="$4" password="$5"
+  local domain="$1" cert="$2" key="$3" port="$4" username="$5" password="$6"
   local log="$STATE_DIR/endpoint-wizard.log" rc=0 bootstrap_password
 
   rm -f "$ENDPOINT_DIR/vpn.toml" "$ENDPOINT_DIR/hosts.toml" \
@@ -768,7 +942,7 @@ generate_endpoint_config() {
     cd "$ENDPOINT_DIR" || exit 1
     timeout --signal=INT --kill-after=3s "${ENDPOINT_WIZARD_TIMEOUT}s" ./setup_wizard \
       --mode non-interactive \
-      --address "0.0.0.0:443" \
+      --address "0.0.0.0:$port" \
       --creds "bootstrap:$bootstrap_password" \
       --hostname "$domain" \
       --lib-settings "$ENDPOINT_DIR/vpn.toml" \
@@ -797,20 +971,20 @@ generate_endpoint_config() {
 }
 
 validate_endpoint_runtime() {
-  local log="$STATE_DIR/endpoint-test.log" rc=0
+  local port="${1:-443}" log="$STATE_DIR/endpoint-test.log" rc=0
   (
     cd "$ENDPOINT_DIR" || exit 1
     timeout --signal=INT --kill-after=2s 5s \
       ./trusttunnel_endpoint vpn.toml hosts.toml --loglvl info
   ) > "$log" 2>&1 || rc=$?
 
-  if grep -q 'Listening to TCP 0.0.0.0:443' "$log" && \
-     grep -q 'Listening to UDP 0.0.0.0:443' "$log"; then
-    ok "Endpoint test passed. TCP and UDP are ready on port 443."
+  if grep -Eq "Listening to TCP .*:${port}([^0-9]|$)" "$log" && \
+     grep -Eq "Listening to UDP .*:${port}([^0-9]|$)" "$log"; then
+    ok "Endpoint test passed. TCP and UDP are ready on port $port."
     return 0
   fi
 
-  error "The endpoint failed to start:"
+  error "The endpoint failed to start on port $port:"
   tail -n 20 "$log" 2>/dev/null || true
   [[ $rc -eq 0 ]] || true
   return 1
@@ -857,9 +1031,9 @@ start_endpoint() {
 }
 
 test_endpoint_tls() {
-  local domain="$1" output
+  local domain="$1" port="${2:-443}" output
   output="$(timeout 8s openssl s_client \
-    -connect 127.0.0.1:443 \
+    -connect "127.0.0.1:$port" \
     -servername "$domain" \
     -verify_hostname "$domain" \
     -verify_return_error </dev/null 2>&1 || true)"
@@ -909,7 +1083,7 @@ validate_client_export() {
 }
 
 export_client_toml() {
-  local username="${1:-$ENDPOINT_USERNAME}" tmp
+  local username="${1:-$ENDPOINT_USERNAME}" port="${2:-}" tmp listen
   [[ -x "$ENDPOINT_DIR/trusttunnel_endpoint" ]] || {
     error "The endpoint is not installed."
     return 1
@@ -920,12 +1094,18 @@ export_client_toml() {
     error "The endpoint domain or username could not be read from the configuration."
     return 1
   }
+  if ! valid_port "$port"; then
+    listen="$(toml_get "$ENDPOINT_DIR/vpn.toml" "" "listen_address" 2>/dev/null || true)"
+    port="${listen##*:}"
+  fi
+  valid_port "$port" || port="${ENDPOINT_PORT:-443}"
+  valid_port "$port" || port="443"
 
   tmp="$(mktemp)" || return 1
   if ! (
     cd "$ENDPOINT_DIR" &&
     ./trusttunnel_endpoint vpn.toml hosts.toml \
-      -c "$username" -a "$DOMAIN:443" --format toml
+      -c "$username" -a "$DOMAIN:$port" --format toml
   ) > "$tmp" 2>"$STATE_DIR/export-error.log"; then
     error "The client export file could not be generated."
     tail -n 20 "$STATE_DIR/export-error.log" 2>/dev/null || true
@@ -1200,11 +1380,11 @@ manage_endpoint_client_accounts() {
 }
 
 configure_endpoint() {
-  local domain cert key username password was_active=0 existing_users account_count=0
+  local domain cert key port username password was_active=0 existing_users account_count=0
   banner
   printf '%sForeign Server Setup (Endpoint)%s\n\n' "$BOLD" "$NC"
-  warn "TrustTunnel requires TCP and UDP port 443."
-  warn "If Xray/3x-ui uses port 443, move it first. This manager will not stop it automatically."
+  info "Port 443 is preferred, but a different free TCP/UDP port can be used."
+  warn "This manager will not stop Xray/3x-ui or another service automatically."
   printf '\n'
 
   if [[ -f "$ENDPOINT_DIR/credentials.toml" ]]; then
@@ -1218,8 +1398,8 @@ configure_endpoint() {
   fi
 
   domain="$(ask_domain "$DOMAIN")" || return 1
-  cert="$(ask_value "Absolute path to the full-chain certificate (CRT/PEM)" "$CERT_PATH")" || return 1
-  key="$(ask_value "Absolute path to the private key" "$KEY_PATH")" || return 1
+  cert="$(ask_certificate_path "$domain" "${CERT_PATH:-/root}")" || { pause; return 1; }
+  key="$(ask_private_key_path "$cert" "${KEY_PATH:-$(dirname "$cert")}")" || { pause; return 1; }
 
   verify_certificate "$domain" "$cert" "$key" || { pause; return 1; }
   check_domain_dns "$domain" || { pause; return 1; }
@@ -1233,11 +1413,21 @@ configure_endpoint() {
     systemctl stop "$ENDPOINT_SERVICE" || return 1
   fi
 
-  if ! ensure_endpoint_port_free; then
+  port="$(choose_endpoint_port "${ENDPOINT_PORT:-443}")" || {
     (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
     unset password
     pause
     return 1
+  }
+  if ! ensure_endpoint_port_free "$port"; then
+    (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
+    unset password
+    pause
+    return 1
+  fi
+  info "Selected endpoint port: $port (TCP and UDP)."
+  if [[ "$port" != "443" ]]; then
+    warn "Make sure TCP/$port and UDP/$port are allowed by the server firewall and provider security rules."
   fi
 
   backup_endpoint
@@ -1254,14 +1444,14 @@ configure_endpoint() {
     return 1
   fi
 
-  generate_endpoint_config "$domain" "$cert" "$key" "$username" "$password" || {
+  generate_endpoint_config "$domain" "$cert" "$key" "$port" "$username" "$password" || {
     unset password
     pause
     return 1
   }
   unset password
 
-  validate_endpoint_runtime || { pause; return 1; }
+  validate_endpoint_runtime "$port" || { pause; return 1; }
   write_endpoint_unit || { pause; return 1; }
   start_endpoint || { pause; return 1; }
 
@@ -1269,18 +1459,20 @@ configure_endpoint() {
   DOMAIN="$domain"
   CERT_PATH="$cert"
   KEY_PATH="$key"
+  ENDPOINT_PORT="$port"
   ENDPOINT_USERNAME="$username"
   CLIENT_MODE=""
   SOCKS_PORT=""
   SOCKS_USERNAME=""
   save_state
 
-  test_endpoint_tls "$domain" || true
-  export_client_toml "$username" || { pause; return 1; }
+  test_endpoint_tls "$domain" "$port" || true
+  export_client_toml "$username" "$port" || { pause; return 1; }
 
   printf '\n'
   hr
   ok "Foreign endpoint setup is complete."
+  printf 'Endpoint port: %s (TCP/UDP)\n' "$port"
   printf '1) Download this file: %s\n' "$ENDPOINT_EXPORT"
   printf '2) Upload it to the Iran server, preferably under /root.\n'
   printf '3) Run this manager on the Iran server and select Iran Client.\n'
@@ -2697,6 +2889,7 @@ list_manager_backups() {
 }
 
 show_status() {
+  local endpoint_listen endpoint_port
   banner
   printf '%sService Status%s\n\n' "$BOLD" "$NC"
   if systemctl cat "$ENDPOINT_SERVICE" >/dev/null 2>&1; then
@@ -2704,7 +2897,11 @@ show_status() {
       "$(systemctl is-active "$ENDPOINT_SERVICE" 2>/dev/null || true)" \
       "$(systemctl is-enabled "$ENDPOINT_SERVICE" 2>/dev/null || true)"
     "$ENDPOINT_DIR/trusttunnel_endpoint" --version 2>/dev/null | sed 's/^/Version: /' || true
-    port_443_users
+    endpoint_listen="$(toml_get "$ENDPOINT_DIR/vpn.toml" "" "listen_address" 2>/dev/null || true)"
+    endpoint_port="${endpoint_listen##*:}"
+    valid_port "$endpoint_port" || endpoint_port="${ENDPOINT_PORT:-443}"
+    valid_port "$endpoint_port" || endpoint_port="443"
+    endpoint_port_users "$endpoint_port"
     printf '\n'
   fi
   if systemctl cat "$CLIENT_SERVICE" >/dev/null 2>&1; then

@@ -9,11 +9,12 @@ set -uo pipefail
 IFS=$'\n\t'
 
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.4.2"
+APP_VERSION="0.4.3"
 INSTALL_PATH="/usr/local/bin/trusttunnel-manager"
 STATE_DIR="/etc/trusttunnel-manager"
 STATE_FILE="$STATE_DIR/state.env"
 BACKUP_DIR="$STATE_DIR/backups"
+EXPORT_DIR="$STATE_DIR/exports"
 SYSTEMD_UNIT_DIR="/etc/systemd/system"
 CA_BUNDLE="${TT_MANAGER_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
 ENDPOINT_WIZARD_TIMEOUT="${TT_MANAGER_ENDPOINT_WIZARD_TIMEOUT:-25}"
@@ -22,7 +23,8 @@ ENDPOINT_DIR="/opt/trusttunnel"
 ENDPOINT_SERVICE="trusttunnel.service"
 ENDPOINT_UNIT="$SYSTEMD_UNIT_DIR/$ENDPOINT_SERVICE"
 CLIENT_EXPORT_DIR="/root"
-ENDPOINT_EXPORT="$CLIENT_EXPORT_DIR/trusttunnel-client-export.toml"
+ENDPOINT_EXPORT="$EXPORT_DIR/trusttunnel-client-export.toml"
+ROOT_ENDPOINT_EXPORT="$CLIENT_EXPORT_DIR/trusttunnel-client-export.toml"
 ENDPOINT_INSTALL_URL="https://raw.githubusercontent.com/TrustTunnel/TrustTunnel/refs/heads/master/scripts/install.sh"
 
 CLIENT_DIR="/opt/trusttunnel_client"
@@ -70,6 +72,15 @@ warn() { printf '%s[WARN]%s %s\n' "$YELLOW" "$NC" "$*" >&2; }
 error() { printf '%s[ERROR]%s %s\n' "$RED" "$NC" "$*" >&2; }
 hr() { printf '%*s\n' "${COLUMNS:-68}" '' | tr ' ' '-'; }
 pause() { printf '\n'; read -r -p "Press Enter to continue... " _ || true; }
+
+pause_to_menu() {
+  printf '\n'
+  if [[ -r /dev/tty ]]; then
+    read -r -p "Press Enter to return to the main menu... " _ </dev/tty || true
+  else
+    read -r -p "Press Enter to return to the main menu... " _ || true
+  fi
+}
 
 banner() {
   clear 2>/dev/null || true
@@ -158,12 +169,13 @@ ask_value() {
 }
 
 ask_secret() {
-  local prompt="$1" first second
+  local prompt="$1" min_length="${2:-12}" first second
+  [[ "$min_length" =~ ^[0-9]+$ ]] || min_length=12
   while true; do
     read -r -s -p "$prompt: " first || return 1
     printf '\n' >&2
-    if [[ ${#first} -lt 12 ]]; then
-      warn "The password must contain at least 12 characters."
+    if (( ${#first} < min_length )); then
+      warn "The password must contain at least $min_length characters."
       continue
     fi
     read -r -s -p "Repeat password: " second || return 1
@@ -238,8 +250,8 @@ certificate_key_match() {
 }
 
 select_certificate_path() {
-  local domain="$1" input="$2" file choice i
-  local -a valid=() matching=() candidates=()
+  local domain="$1" input="$2" file choice i count
+  local -a valid=() matching=() fullchain_valid=() fullchain_matching=() candidates=()
   [[ "$input" == "root" ]] && input="/root"
   input="$(normalize_path "$input" "/")"
 
@@ -260,14 +272,25 @@ select_certificate_path() {
     [[ -n "$file" ]] || continue
     if openssl x509 -in "$file" -noout >/dev/null 2>&1; then
       valid+=("$file")
+      count="$(certificate_count "$file")"
+      (( count >= 2 )) && fullchain_valid+=("$file")
       if openssl x509 -in "$file" -noout -checkhost "$domain" >/dev/null 2>&1; then
         matching+=("$file")
+        (( count >= 2 )) && fullchain_matching+=("$file")
       fi
     fi
   done < <(find "$input" -maxdepth 1 -type f \
     \( -iname '*.crt' -o -iname '*.pem' -o -iname '*.cer' \) -print 2>/dev/null | sort)
 
-  if (( ${#matching[@]} > 0 )); then candidates=("${matching[@]}"); else candidates=("${valid[@]}"); fi
+  if (( ${#fullchain_matching[@]} > 0 )); then
+    candidates=("${fullchain_matching[@]}")
+  elif (( ${#matching[@]} > 0 )); then
+    candidates=("${matching[@]}")
+  elif (( ${#fullchain_valid[@]} > 0 )); then
+    candidates=("${fullchain_valid[@]}")
+  else
+    candidates=("${valid[@]}")
+  fi
   if (( ${#candidates[@]} == 0 )); then
     error "No valid certificate file (.crt/.pem/.cer) was found in $input."
     return 1
@@ -368,7 +391,7 @@ toml_escape() {
 }
 
 ensure_state_dirs() {
-  install -d -m 0700 "$STATE_DIR" "$BACKUP_DIR" "$CLIENT_PROFILES_DIR"
+  install -d -m 0700 "$STATE_DIR" "$BACKUP_DIR" "$EXPORT_DIR" "$CLIENT_PROFILES_DIR"
 }
 
 save_state() {
@@ -754,7 +777,7 @@ certificate_count() {
 }
 
 verify_certificate() {
-  local domain="$1" cert="$2" key="$3" tmp cert_fp key_fp count chain="" host_check
+  local domain="$1" cert="$2" key="$3" tmp cert_fp key_fp count chain=""
 
   [[ -r "$cert" ]] || { error "Certificate file is not readable: $cert"; return 1; }
   [[ -r "$key" ]] || { error "Private key file is not readable: $key"; return 1; }
@@ -772,8 +795,7 @@ verify_certificate() {
     openssl x509 -in "$cert" -noout -dates 2>/dev/null || true
     return 1
   fi
-  host_check="$(openssl x509 -in "$cert" -noout -checkhost "$domain" 2>&1 || true)"
-  if ! grep -Fq "Hostname $domain does match certificate" <<< "$host_check"; then
+  if ! openssl x509 -in "$cert" -noout -checkhost "$domain" >/dev/null 2>&1; then
     error "Domain $domain is not covered by the certificate SAN/CN."
     return 1
   fi
@@ -1119,8 +1141,31 @@ export_client_toml() {
   fi
   install -m 0600 "$tmp" "$ENDPOINT_EXPORT"
   rm -f "$tmp"
-  ok "The Iran client export file was created: $ENDPOINT_EXPORT"
+  ok "The Iran client export TOML was created: $ENDPOINT_EXPORT"
   warn "This file contains the endpoint password. Never publish it or upload it to GitHub."
+}
+
+copy_endpoint_export_to_root() {
+  local source="${1:-$ENDPOINT_EXPORT}" target="${2:-$ROOT_ENDPOINT_EXPORT}"
+  [[ -s "$source" ]] || { error "The current client export does not exist: $source"; return 1; }
+
+  printf '\nCurrent client TOML: %s\n' "$source"
+  if [[ -f "$target" ]]; then
+    warn "A file already exists at $target and may belong to an older configuration."
+    if ! confirm "Replace it with the current client TOML in /root?" "y"; then
+      info "The current TOML remains available at: $source"
+      return 0
+    fi
+  else
+    if ! confirm "Create a convenient copy of this TOML in /root?" "y"; then
+      info "The current TOML remains available at: $source"
+      return 0
+    fi
+  fi
+
+  install -m 0600 "$source" "$target" || { error "Could not copy the client TOML to $target"; return 1; }
+  ok "Client TOML copied to: $target"
+  warn "The TOML contains the Endpoint password. Keep it root-only and transfer it securely."
 }
 
 credentials_has_username() {
@@ -1472,12 +1517,20 @@ configure_endpoint() {
   printf '\n'
   hr
   ok "Foreign endpoint setup is complete."
-  printf 'Endpoint port: %s (TCP/UDP)\n' "$port"
-  printf '1) Download this file: %s\n' "$ENDPOINT_EXPORT"
-  printf '2) Upload it to the Iran server, preferably under /root.\n'
+  printf 'Endpoint port : %s (TCP/UDP)\n' "$port"
+  printf 'Client TOML   : %s\n' "$ENDPOINT_EXPORT"
+  printf 'Wizard log    : %s\n' "$STATE_DIR/endpoint-wizard.log"
+  printf 'Runtime log   : %s\n' "$STATE_DIR/endpoint-test.log"
+  printf '\nThe screen will stay here so you can review the installation result.\n'
+
+  copy_endpoint_export_to_root "$ENDPOINT_EXPORT" "$ROOT_ENDPOINT_EXPORT" || true
+
+  printf '\nNext steps:\n'
+  printf '1) Transfer the current client TOML to the Iran server.\n'
+  printf '2) Put it under /root on the Iran server for easy discovery.\n'
   printf '3) Run this manager on the Iran server and select Iran Client.\n'
   printf '4) Add more client accounts later from: Manage installation > Endpoint accounts.\n'
-  pause
+  pause_to_menu
 }
 
 find_endpoint_toml() {
@@ -1571,6 +1624,38 @@ port_listener() {
   ss -H -lntp 2>/dev/null | grep -E ":(${port})([[:space:]]|$)" || true
 }
 
+socks_config_is_loopback_only() {
+  local file="$1" address host
+  address="$(toml_get "$file" "listener.socks" "address" 2>/dev/null || true)"
+  host="${address%:*}"
+  case "$host" in
+    127.0.0.1|localhost|\[::1\]) return 0 ;;
+    *)
+      error "Unsafe SOCKS listener address detected: ${address:-missing}"
+      error "SOCKS must remain bound to loopback (127.0.0.1) unless you intentionally redesign the security model."
+      return 1
+      ;;
+  esac
+}
+
+socks_runtime_is_loopback_only() {
+  local port="$1" users line local_addr found=0
+  users="$(port_listener "$port")"
+  [[ -n "$users" ]] || return 1
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local_addr="$(awk '{print $4}' <<< "$line")"
+    case "$local_addr" in
+      127.0.0.1:"$port"|\[::1\]:"$port") found=1 ;;
+      *)
+        error "SOCKS runtime listener is not loopback-only: $local_addr"
+        return 1
+        ;;
+    esac
+  done <<< "$users"
+  (( found == 1 ))
+}
+
 ensure_socks_port_available() {
   local port="$1" users other
   users="$(port_listener "$port")"
@@ -1648,6 +1733,11 @@ test_socks() {
     return 1
   fi
   ok "SOCKS5 is listening on $address:$port."
+  if ! socks_runtime_is_loopback_only "$port"; then
+    error "SOCKS security check failed. Refusing to treat a non-loopback listener as safe."
+    return 1
+  fi
+  ok "SOCKS security check passed: listener is loopback-only and not directly exposed to the Internet/LAN."
   exit_ip="$(curl -4 -fsS --max-time 15 \
     --socks5-hostname "$address:$port" \
     --proxy-user "$username:$password" \
@@ -1877,7 +1967,7 @@ configure_client_profile() {
     fi
     if ! ensure_profile_socks_port_available "$socks_port" "$profile"; then pause; return 1; fi
     socks_user="$(ask_username "SOCKS5 username for profile $profile")" || return 1
-    socks_password="$(ask_secret "SOCKS5 password for profile $profile")" || return 1
+    socks_password="$(ask_secret "SOCKS5 password for profile $profile (any length, including empty)" 0)" || return 1
   fi
 
   if [[ ! -x "$CLIENT_DIR/trusttunnel_client" || ! -x "$CLIENT_DIR/setup_wizard" ]]; then
@@ -1928,6 +2018,13 @@ configure_client_profile() {
         pause
         return 1
       }
+    socks_config_is_loopback_only "$candidate" || {
+      rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
+      unset socks_password
+      rm -f "$candidate"
+      pause
+      return 1
+    }
   else
     prepare_tun_config "$generated" "$candidate" || {
       rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
@@ -1977,10 +2074,11 @@ configure_client_profile() {
     printf '  Port    : %s\n' "$socks_port"
     printf '  Username: %s\n' "$socks_user"
     printf '  Password: use the SOCKS password entered for this profile\n'
+    printf '  Security: loopback-only (127.0.0.1); not directly reachable from Internet/LAN\n'
   else
     ok "TUN client profile $profile is ready."
   fi
-  pause
+  pause_to_menu
 }
 
 configure_client() {
@@ -1998,7 +2096,7 @@ configure_client() {
   if [[ "$mode" == "socks" ]]; then
     socks_port="$(ask_port "Local SOCKS5 port" "${SOCKS_PORT:-27831}")" || return 1
     socks_user="$(ask_username "SOCKS5 username" "$SOCKS_USERNAME")" || return 1
-    socks_password="$(ask_secret "SOCKS5 password (independent from endpoint credentials)")" || return 1
+    socks_password="$(ask_secret "SOCKS5 password (any length, including empty; independent from endpoint credentials)" 0)" || return 1
     if ! ensure_socks_port_available "$socks_port"; then
       unset socks_password
       pause
@@ -2047,6 +2145,12 @@ configure_client() {
         pause
         return 1
       }
+    socks_config_is_loopback_only "$candidate" || {
+      unset socks_password
+      rm -f "$candidate"
+      pause
+      return 1
+    }
   else
     prepare_tun_config "$generated" "$candidate" || { pause; return 1; }
   fi
@@ -2085,13 +2189,13 @@ configure_client() {
     printf '  Port    : %s\n' "$socks_port"
     printf '  Username: %s\n' "$socks_user"
     printf '  Password: use the SOCKS password entered during setup\n'
-    printf 'This listener is bound to loopback only and is not reachable from the Internet.\n'
+    printf '  Security: loopback-only (127.0.0.1); not directly reachable from Internet/LAN\n'
   else
     hr
     ok "TUN setup on the Iran server is complete."
     warn "In this mode, TrustTunnel manages the system routes."
   fi
-  pause
+  pause_to_menu
 }
 
 instance_service_state() {
@@ -2993,8 +3097,11 @@ uninstall_role() {
     systemctl disable --now "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
     rm -f "$ENDPOINT_UNIT"
     rm -rf "$ENDPOINT_DIR"
-    if [[ -f "$ENDPOINT_EXPORT" ]] && confirm "Also remove the secret export file $ENDPOINT_EXPORT?" "y"; then
+    if [[ -f "$ENDPOINT_EXPORT" ]] && confirm "Also remove the current secret export file $ENDPOINT_EXPORT?" "y"; then
       rm -f "$ENDPOINT_EXPORT"
+    fi
+    if [[ -f "$ROOT_ENDPOINT_EXPORT" ]] && confirm "Also remove the /root convenience copy $ROOT_ENDPOINT_EXPORT?" "y"; then
+      rm -f "$ROOT_ENDPOINT_EXPORT"
     fi
   elif [[ "$ROLE" == "iran" ]]; then
     (( backup == 1 )) && backup_client

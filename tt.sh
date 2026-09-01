@@ -9,8 +9,9 @@ set -uo pipefail
 IFS=$'\n\t'
 
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.4.5"
+APP_VERSION="0.4.7"
 INSTALL_PATH="${TT_MANAGER_INSTALL_PATH:-/usr/local/bin/trusttunnel-manager}"
+MANAGER_INSTALL_URL="${TT_MANAGER_INSTALL_URL:-https://raw.githubusercontent.com/Colaabi75/tt/main/tt.sh}"
 STATE_DIR="/etc/trusttunnel-manager"
 STATE_FILE="$STATE_DIR/state.env"
 BACKUP_DIR="$STATE_DIR/backups"
@@ -135,33 +136,39 @@ install_dependencies() {
   fi
 }
 
-install_manager_command() {
-  local src="${BASH_SOURCE[0]:-}" install_dir src_real dst_real tmp src_size tmp_size
+install_manager_source() {
+  local src="$1" install_dir src_real dst_real tmp src_size tmp_size
 
-  # When Bash reads the manager from a pipe/process substitution (/dev/fd/*),
-  # the descriptor may already be at EOF by the time this function runs.
-  # Never copy such a source over the installed command; that could truncate it.
   if [[ -z "$src" || ! -f "$src" || ! -r "$src" ]]; then
-    warn "Manager self-install skipped because the running script is not a readable regular file."
-    warn "Run the downloaded .sh file directly once if you want to install/update the trusttunnel-manager command."
-    return 0
+    error "Manager installation source is not a readable regular file: ${src:-missing}"
+    return 1
   fi
 
   src_real="$(readlink -m -- "$src" 2>/dev/null || printf '%s' "$src")"
   dst_real="$(readlink -m -- "$INSTALL_PATH" 2>/dev/null || printf '%s' "$INSTALL_PATH")"
-  [[ "$src_real" == "$dst_real" ]] && return 0
+  if [[ "$src_real" == "$dst_real" ]]; then
+    [[ -s "$INSTALL_PATH" ]] || {
+      error "The installed manager command is empty: $INSTALL_PATH"
+      return 1
+    }
+    if ! bash -n "$INSTALL_PATH" >/dev/null 2>&1; then
+      error "The installed manager command has invalid Bash syntax: $INSTALL_PATH"
+      return 1
+    fi
+    return 0
+  fi
 
   if [[ ! -s "$src" ]]; then
-    error "Manager self-install refused an empty source file: $src"
+    error "Manager installation refused an empty source file: $src"
     return 1
   fi
   if ! bash -n "$src" >/dev/null 2>&1; then
-    error "Manager self-install refused a source file with invalid Bash syntax: $src"
+    error "Manager installation refused a source file with invalid Bash syntax: $src"
     return 1
   fi
   if ! grep -Fqx '# TrustTunnel Manager' "$src" ||
      ! grep -Fq 'APP_NAME="TrustTunnel Manager"' "$src"; then
-    error "Manager self-install refused a file that does not look like TrustTunnel Manager: $src"
+    error "Manager installation refused a file that does not look like TrustTunnel Manager: $src"
     return 1
   fi
 
@@ -185,12 +192,18 @@ install_manager_command() {
   tmp_size="$(stat -c '%s' -- "$tmp" 2>/dev/null || printf '0')"
   if [[ "$src_size" == "0" || "$tmp_size" != "$src_size" || ! -s "$tmp" ]]; then
     rm -f -- "$tmp"
-    error "Manager self-install copy verification failed; the existing installed command was left untouched."
+    error "Manager installation copy verification failed; the existing installed command was left untouched."
     return 1
   fi
   if ! bash -n "$tmp" >/dev/null 2>&1; then
     rm -f -- "$tmp"
-    error "Manager self-install syntax verification failed; the existing installed command was left untouched."
+    error "Manager installation syntax verification failed; the existing installed command was left untouched."
+    return 1
+  fi
+  if ! grep -Fqx '# TrustTunnel Manager' "$tmp" ||
+     ! grep -Fq 'APP_NAME="TrustTunnel Manager"' "$tmp"; then
+    rm -f -- "$tmp"
+    error "Manager installation identity verification failed; the existing installed command was left untouched."
     return 1
   fi
   if ! chmod 0755 "$tmp"; then
@@ -209,6 +222,57 @@ install_manager_command() {
 
   ok "Manager command installed/updated: $INSTALL_PATH"
   return 0
+}
+
+install_manager_command() {
+  local src="${BASH_SOURCE[0]:-}"
+
+  # When Bash reads the manager from a pipe/process substitution (/dev/fd/*),
+  # the descriptor may already be at EOF by the time this function runs.
+  # Never copy such a source over the installed command; that could truncate it.
+  if [[ -z "$src" || ! -f "$src" || ! -r "$src" ]]; then
+    warn "Manager self-install skipped because the running script is not a readable regular file."
+    warn "Use main menu option 5 (Install/Update Manager locally) to install it safely."
+    return 0
+  fi
+
+  install_manager_source "$src"
+}
+
+install_manager_from_url() {
+  local url="${1:-$MANAGER_INSTALL_URL}" tmp rc=0
+  [[ -n "$url" ]] || { error "Manager download URL is empty."; return 1; }
+
+  tmp="$(mktemp /tmp/trusttunnel-manager-download.XXXXXX)" || {
+    error "Could not create a temporary file for the manager download."
+    return 1
+  }
+
+  info "Downloading TrustTunnel Manager for local installation..."
+  if ! curl -fL --connect-timeout 10 --retry 2 --retry-delay 2 -o "$tmp" "$url"; then
+    rm -f -- "$tmp"
+    error "The manager could not be downloaded. Check Internet and GitHub access."
+    return 1
+  fi
+
+  install_manager_source "$tmp"
+  rc=$?
+  if (( rc != 0 )); then
+    rm -f -- "$tmp"
+    return "$rc"
+  fi
+  rm -f -- "$tmp"
+  ok "Local installation is ready. You can run: trusttunnel-manager"
+  return 0
+}
+
+install_manager_locally_menu() {
+  banner
+  printf '%sInstall/Update Manager Locally%s\n\n' "$BOLD" "$NC"
+  printf 'Source : %s\n' "$MANAGER_INSTALL_URL"
+  printf 'Target : %s\n\n' "$INSTALL_PATH"
+  install_manager_from_url || true
+  pause
 }
 
 confirm() {
@@ -3476,6 +3540,7 @@ main_menu() {
     printf '  2) Iran Client Connections\n'
     printf '  3) View All Detected Installations\n'
     printf '  4) Backup Information and Files\n'
+    printf '  5) Install/Update Manager locally\n'
     printf '  0) Exit\n\n'
     read -r -p "Select: " choice || exit 0
     case "$choice" in
@@ -3483,6 +3548,7 @@ main_menu() {
       2) iran_client_connections_menu ;;
       3) manage_discovered_installations ;;
       4) list_manager_backups ;;
+      5) install_manager_locally_menu ;;
       0) exit 0 ;;
       *) warn "Invalid option."; sleep 1 ;;
     esac

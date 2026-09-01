@@ -9,8 +9,8 @@ set -uo pipefail
 IFS=$'\n\t'
 
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.4.4"
-INSTALL_PATH="/usr/local/bin/trusttunnel-manager"
+APP_VERSION="0.4.5"
+INSTALL_PATH="${TT_MANAGER_INSTALL_PATH:-/usr/local/bin/trusttunnel-manager}"
 STATE_DIR="/etc/trusttunnel-manager"
 STATE_FILE="$STATE_DIR/state.env"
 BACKUP_DIR="$STATE_DIR/backups"
@@ -136,11 +136,79 @@ install_dependencies() {
 }
 
 install_manager_command() {
-  local src="${BASH_SOURCE[0]}"
-  [[ "$src" == "$INSTALL_PATH" ]] && return 0
-  if [[ -r "$src" ]]; then
-    install -m 0755 "$src" "$INSTALL_PATH" 2>/dev/null || true
+  local src="${BASH_SOURCE[0]:-}" install_dir src_real dst_real tmp src_size tmp_size
+
+  # When Bash reads the manager from a pipe/process substitution (/dev/fd/*),
+  # the descriptor may already be at EOF by the time this function runs.
+  # Never copy such a source over the installed command; that could truncate it.
+  if [[ -z "$src" || ! -f "$src" || ! -r "$src" ]]; then
+    warn "Manager self-install skipped because the running script is not a readable regular file."
+    warn "Run the downloaded .sh file directly once if you want to install/update the trusttunnel-manager command."
+    return 0
   fi
+
+  src_real="$(readlink -m -- "$src" 2>/dev/null || printf '%s' "$src")"
+  dst_real="$(readlink -m -- "$INSTALL_PATH" 2>/dev/null || printf '%s' "$INSTALL_PATH")"
+  [[ "$src_real" == "$dst_real" ]] && return 0
+
+  if [[ ! -s "$src" ]]; then
+    error "Manager self-install refused an empty source file: $src"
+    return 1
+  fi
+  if ! bash -n "$src" >/dev/null 2>&1; then
+    error "Manager self-install refused a source file with invalid Bash syntax: $src"
+    return 1
+  fi
+  if ! grep -Fqx '# TrustTunnel Manager' "$src" ||
+     ! grep -Fq 'APP_NAME="TrustTunnel Manager"' "$src"; then
+    error "Manager self-install refused a file that does not look like TrustTunnel Manager: $src"
+    return 1
+  fi
+
+  install_dir="$(dirname "$INSTALL_PATH")"
+  if ! install -d -m 0755 "$install_dir"; then
+    error "Could not create the manager installation directory: $install_dir"
+    return 1
+  fi
+  tmp="$(mktemp "$install_dir/.trusttunnel-manager.XXXXXX")" || {
+    error "Could not create a temporary manager file in $install_dir"
+    return 1
+  }
+
+  if ! command cat -- "$src" > "$tmp"; then
+    rm -f -- "$tmp"
+    error "Could not copy the manager into its temporary installation file."
+    return 1
+  fi
+
+  src_size="$(stat -c '%s' -- "$src" 2>/dev/null || printf '0')"
+  tmp_size="$(stat -c '%s' -- "$tmp" 2>/dev/null || printf '0')"
+  if [[ "$src_size" == "0" || "$tmp_size" != "$src_size" || ! -s "$tmp" ]]; then
+    rm -f -- "$tmp"
+    error "Manager self-install copy verification failed; the existing installed command was left untouched."
+    return 1
+  fi
+  if ! bash -n "$tmp" >/dev/null 2>&1; then
+    rm -f -- "$tmp"
+    error "Manager self-install syntax verification failed; the existing installed command was left untouched."
+    return 1
+  fi
+  if ! chmod 0755 "$tmp"; then
+    rm -f -- "$tmp"
+    error "Could not set executable permissions on the temporary manager file."
+    return 1
+  fi
+
+  # tmp is created in the destination directory, so mv replaces the command
+  # atomically on the same filesystem. The old command is untouched until here.
+  if ! mv -f -- "$tmp" "$INSTALL_PATH"; then
+    rm -f -- "$tmp"
+    error "Could not atomically install the manager command at $INSTALL_PATH"
+    return 1
+  fi
+
+  ok "Manager command installed/updated: $INSTALL_PATH"
+  return 0
 }
 
 confirm() {
@@ -3437,7 +3505,7 @@ main() {
   require_platform
   install_dependencies || exit 1
   ensure_state_dirs
-  install_manager_command
+  install_manager_command || warn "The manager command could not be installed/updated; continuing with the current session."
   load_state
 
   case "${1:-}" in

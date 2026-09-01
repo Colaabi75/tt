@@ -9,7 +9,7 @@ set -uo pipefail
 IFS=$'\n\t'
 
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.4.3"
+APP_VERSION="0.4.4"
 INSTALL_PATH="/usr/local/bin/trusttunnel-manager"
 STATE_DIR="/etc/trusttunnel-manager"
 STATE_FILE="$STATE_DIR/state.env"
@@ -467,6 +467,25 @@ toml_get() {
 toml_has_section() {
   local file="$1" section="$2"
   [[ -r "$file" ]] && grep -Eq "^[[:space:]]*\\[${section//./\\.}\\][[:space:]]*$" "$file"
+}
+
+remove_toml_section() {
+  local input="$1" section="$2" output="$3"
+  [[ -r "$input" && -n "$section" && -n "$output" ]] || return 1
+  awk -v wanted="$section" '
+    function section_name(line, name) {
+      name=line
+      sub(/^[[:space:]]*\[/, "", name)
+      sub(/\][[:space:]]*$/, "", name)
+      return name
+    }
+    /^[[:space:]]*\[[^][]+\][[:space:]]*$/ {
+      skip=(section_name($0) == wanted)
+      if (!skip) print
+      next
+    }
+    !skip { print }
+  ' "$input" > "$output"
 }
 
 toml_client_usernames() {
@@ -2620,6 +2639,9 @@ remove_discovered_instance() {
   [[ "$typed" == "REMOVE" ]] || { warn "Removal cancelled."; pause; return 0; }
 
   backup_discovered_instance "$index"
+  if [[ "${DISC_ROLE[$index]:-}" == "endpoint" && -n "$service" ]]; then
+    remove_endpoint_restart_schedule "$service" 1 || true
+  fi
   if [[ -n "$service" ]]; then
     systemctl disable --now "$service" >/dev/null 2>&1 || true
     fragment="$(systemctl show "$service" -p FragmentPath --value 2>/dev/null || true)"
@@ -2758,6 +2780,214 @@ enable_endpoint_metrics() {
   pause
 }
 
+disable_endpoint_metrics() {
+  local index="$1" primary backup tmp
+  primary="${DISC_PRIMARY[$index]:-}"
+  [[ -f "$primary" ]] || { error "Endpoint primary configuration was not found."; pause; return 1; }
+  if ! toml_has_section "$primary" "metrics"; then
+    ok "Endpoint metrics are already disabled."
+    pause
+    return 0
+  fi
+
+  backup="$primary.before-metrics-disable-$(timestamp)"
+  tmp="$(mktemp "$(dirname "$primary")/.vpn-without-metrics.XXXXXX")" || return 1
+  cp -a -- "$primary" "$backup" || { rm -f -- "$tmp"; return 1; }
+  if ! remove_toml_section "$primary" "metrics" "$tmp"; then
+    rm -f -- "$tmp"
+    error "Could not remove the [metrics] section."
+    pause
+    return 1
+  fi
+  install -m 0600 "$tmp" "$primary" || { rm -f -- "$tmp"; return 1; }
+  rm -f -- "$tmp"
+
+  if restart_discovered_instance "$index"; then
+    ok "Endpoint metrics were disabled. The localhost metrics listener is no longer configured."
+  else
+    cp -a -- "$backup" "$primary"
+    restart_discovered_instance "$index" || true
+    error "Disabling metrics failed and the previous configuration was restored."
+    pause
+    return 1
+  fi
+  pause
+}
+
+toggle_endpoint_metrics() {
+  local index="$1" primary
+  primary="${DISC_PRIMARY[$index]:-}"
+  [[ -f "$primary" ]] || { error "Endpoint primary configuration was not found."; pause; return 1; }
+  if toml_has_section "$primary" "metrics"; then
+    disable_endpoint_metrics "$index"
+  else
+    enable_endpoint_metrics "$index"
+  fi
+}
+
+endpoint_restart_service_is_safe() {
+  [[ "${1:-}" =~ ^[A-Za-z0-9_.@:-]+\.service$ ]]
+}
+
+endpoint_restart_slug() {
+  local service="${1:-}" base
+  endpoint_restart_service_is_safe "$service" || return 1
+  base="${service%.service}"
+  printf '%s' "$base" | sed 's/[^A-Za-z0-9_.@-]/-/g'
+}
+
+endpoint_restart_helper_unit() {
+  local slug
+  slug="$(endpoint_restart_slug "$1")" || return 1
+  printf 'trusttunnel-manager-restart-%s.service' "$slug"
+}
+
+endpoint_restart_timer_unit() {
+  local slug
+  slug="$(endpoint_restart_slug "$1")" || return 1
+  printf 'trusttunnel-manager-restart-%s.timer' "$slug"
+}
+
+endpoint_restart_interval_minutes() {
+  local service="$1" timer path value
+  timer="$(endpoint_restart_timer_unit "$service")" || return 1
+  path="$SYSTEMD_UNIT_DIR/$timer"
+  [[ -f "$path" ]] || { printf '0'; return 0; }
+  value="$(awk -F= '$1 ~ /^[[:space:]]*OnUnitActiveSec[[:space:]]*$/ {
+    gsub(/[[:space:]]/, "", $2); print $2; exit
+  }' "$path" 2>/dev/null || true)"
+  if [[ "$value" =~ ^([0-9]+)min$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  else
+    printf '0'
+  fi
+}
+
+remove_endpoint_restart_schedule() {
+  local service="$1" quiet="${2:-0}" helper timer helper_path timer_path existed=0
+  endpoint_restart_service_is_safe "$service" || return 1
+  helper="$(endpoint_restart_helper_unit "$service")" || return 1
+  timer="$(endpoint_restart_timer_unit "$service")" || return 1
+  helper_path="$SYSTEMD_UNIT_DIR/$helper"
+  timer_path="$SYSTEMD_UNIT_DIR/$timer"
+  [[ -f "$helper_path" || -f "$timer_path" ]] && existed=1
+
+  systemctl disable --now "$timer" >/dev/null 2>&1 || true
+  rm -f -- "$helper_path" "$timer_path"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed "$helper" "$timer" >/dev/null 2>&1 || true
+  if [[ "$quiet" != "1" ]]; then
+    if (( existed == 1 )); then
+      ok "Automatic endpoint restart was disabled."
+    else
+      ok "Automatic endpoint restart is already disabled."
+    fi
+  fi
+}
+
+configure_endpoint_restart_schedule() {
+  local index="$1" service current value helper timer helper_path timer_path systemctl_bin
+  local backup_dir had_helper=0 had_timer=0 was_enabled=0 was_active=0
+  service="${DISC_SERVICE[$index]:-}"
+  if [[ -z "$service" ]]; then
+    error "This endpoint is not attached to a detected systemd service."
+    pause
+    return 1
+  fi
+  if ! endpoint_restart_service_is_safe "$service"; then
+    error "The detected endpoint service name is not safe for an automatic restart unit: $service"
+    pause
+    return 1
+  fi
+
+  current="$(endpoint_restart_interval_minutes "$service" 2>/dev/null || printf '0')"
+  printf 'Current automatic restart interval: '
+  if [[ "$current" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s minute(s)\n' "$current"
+  else
+    printf 'disabled\n'
+    current="0"
+  fi
+  printf 'Enter 0 to disable automatic restarts. Enter 1 or more for the interval in minutes.\n'
+  while true; do
+    read -r -p "Restart endpoint every how many minutes? [$current]: " value || return 1
+    value="${value:-$current}"
+    if [[ "$value" =~ ^[0-9]+$ && ${#value} -le 9 ]]; then
+      value="$((10#$value))"
+      break
+    fi
+    warn "Enter 0 to disable, or a whole number of minutes (1 or more)."
+  done
+
+  if (( value == 0 )); then
+    remove_endpoint_restart_schedule "$service"
+    pause
+    return 0
+  fi
+
+  helper="$(endpoint_restart_helper_unit "$service")" || return 1
+  timer="$(endpoint_restart_timer_unit "$service")" || return 1
+  helper_path="$SYSTEMD_UNIT_DIR/$helper"
+  timer_path="$SYSTEMD_UNIT_DIR/$timer"
+  systemctl_bin="$(command -v systemctl)"
+  [[ -x "$systemctl_bin" ]] || { error "systemctl executable was not found."; pause; return 1; }
+
+  backup_dir="$(mktemp -d)" || return 1
+  if [[ -f "$helper_path" ]]; then cp -a -- "$helper_path" "$backup_dir/helper"; had_helper=1; fi
+  if [[ -f "$timer_path" ]]; then cp -a -- "$timer_path" "$backup_dir/timer"; had_timer=1; fi
+  systemctl is-enabled --quiet "$timer" 2>/dev/null && was_enabled=1
+  systemctl is-active --quiet "$timer" 2>/dev/null && was_active=1
+
+  umask 077
+  command cat > "$helper_path" <<EOF
+[Unit]
+Description=Restart TrustTunnel Endpoint ($service)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$systemctl_bin restart $service
+EOF
+  chmod 0644 "$helper_path"
+
+  command cat > "$timer_path" <<EOF
+[Unit]
+Description=Periodic restart timer for TrustTunnel Endpoint ($service)
+
+[Timer]
+OnActiveSec=${value}min
+OnUnitActiveSec=${value}min
+AccuracySec=1s
+Unit=$helper
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 0644 "$timer_path"
+
+  if systemctl daemon-reload && systemctl enable "$timer" >/dev/null 2>&1 && systemctl restart "$timer"; then
+    rm -rf -- "$backup_dir"
+    ok "Automatic endpoint restart is enabled every $value minute(s)."
+    printf 'Timer: %s\n' "$timer"
+    systemctl list-timers "$timer" --no-pager 2>/dev/null || true
+    pause
+    return 0
+  fi
+
+  error "Could not activate the automatic restart timer. Restoring the previous timer configuration."
+  systemctl disable --now "$timer" >/dev/null 2>&1 || true
+  if (( had_helper == 1 )); then cp -a -- "$backup_dir/helper" "$helper_path"; else rm -f -- "$helper_path"; fi
+  if (( had_timer == 1 )); then cp -a -- "$backup_dir/timer" "$timer_path"; else rm -f -- "$timer_path"; fi
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if (( had_timer == 1 )); then
+    (( was_enabled == 1 )) && systemctl enable "$timer" >/dev/null 2>&1 || true
+    (( was_active == 1 )) && systemctl restart "$timer" >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "$backup_dir"
+  pause
+  return 1
+}
+
 show_endpoint_connections() {
   local index="$1" primary address metrics="" listen port peers
   primary="${DISC_PRIMARY[$index]:-}"
@@ -2811,7 +3041,7 @@ show_client_outbound_details() {
 }
 
 manage_discovered_instance() {
-  local index="$1" choice
+  local index="$1" choice primary metrics_address restart_minutes
   while true; do
     banner
     printf '%sManage %s%s\n' "$BOLD" "$(instance_summary "$index")" "$NC"
@@ -2825,9 +3055,21 @@ manage_discovered_instance() {
     printf '  7) Update TrustTunnel core\n'
     printf '  8) Remove this instance\n'
     if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
+      primary="${DISC_PRIMARY[$index]:-}"
+      metrics_address="$(toml_get "$primary" "metrics" "address" 2>/dev/null || true)"
+      restart_minutes="$(endpoint_restart_interval_minutes "${DISC_SERVICE[$index]:-}" 2>/dev/null || printf '0')"
       printf '  9) Manage endpoint client accounts and exports\n'
       printf ' 10) Show aggregate connection statistics\n'
-      printf ' 11) Enable localhost metrics\n'
+      if toml_has_section "$primary" "metrics"; then
+        printf ' 11) Disable localhost metrics (%s)\n' "${metrics_address:-configured}"
+      else
+        printf ' 11) Enable localhost metrics\n'
+      fi
+      if [[ "$restart_minutes" =~ ^[1-9][0-9]*$ ]]; then
+        printf ' 12) Automatic endpoint restart (%s minute(s))\n' "$restart_minutes"
+      else
+        printf ' 12) Automatic endpoint restart (disabled)\n'
+      fi
     else
       printf '  9) Show 3x-ui SOCKS outbound details\n'
     fi
@@ -2866,7 +3108,14 @@ manage_discovered_instance() {
         ;;
       11)
         if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
-          enable_endpoint_metrics "$index"
+          toggle_endpoint_metrics "$index"
+        else
+          warn "Invalid option."
+        fi
+        ;;
+      12)
+        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
+          configure_endpoint_restart_schedule "$index"
         else
           warn "Invalid option."
         fi
@@ -3094,6 +3343,7 @@ uninstall_role() {
 
   if [[ "$ROLE" == "foreign" ]]; then
     (( backup == 1 )) && backup_endpoint
+    remove_endpoint_restart_schedule "$ENDPOINT_SERVICE" 1 || true
     systemctl disable --now "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
     rm -f "$ENDPOINT_UNIT"
     rm -rf "$ENDPOINT_DIR"

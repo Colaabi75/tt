@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 # TrustTunnel Manager
 # Unified interactive installer/manager for:
 #   - Foreign server: TrustTunnel Endpoint
@@ -7,9 +6,8 @@
 
 set -uo pipefail
 IFS=$'\n\t'
-
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.4.7"
+APP_VERSION="0.4.8"
 INSTALL_PATH="${TT_MANAGER_INSTALL_PATH:-/usr/local/bin/trusttunnel-manager}"
 MANAGER_INSTALL_URL="${TT_MANAGER_INSTALL_URL:-https://raw.githubusercontent.com/Colaabi75/tt/main/tt.sh}"
 STATE_DIR="/etc/trusttunnel-manager"
@@ -19,7 +17,6 @@ EXPORT_DIR="$STATE_DIR/exports"
 SYSTEMD_UNIT_DIR="/etc/systemd/system"
 CA_BUNDLE="${TT_MANAGER_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
 ENDPOINT_WIZARD_TIMEOUT="${TT_MANAGER_ENDPOINT_WIZARD_TIMEOUT:-25}"
-
 ENDPOINT_DIR="/opt/trusttunnel"
 ENDPOINT_SERVICE="trusttunnel.service"
 ENDPOINT_UNIT="$SYSTEMD_UNIT_DIR/$ENDPOINT_SERVICE"
@@ -27,7 +24,6 @@ CLIENT_EXPORT_DIR="/root"
 ENDPOINT_EXPORT="$EXPORT_DIR/trusttunnel-client-export.toml"
 ROOT_ENDPOINT_EXPORT="$CLIENT_EXPORT_DIR/trusttunnel-client-export.toml"
 ENDPOINT_INSTALL_URL="https://raw.githubusercontent.com/TrustTunnel/TrustTunnel/refs/heads/master/scripts/install.sh"
-
 CLIENT_DIR="/opt/trusttunnel_client"
 CLIENT_SERVICE="trusttunnel-client.service"
 CLIENT_UNIT="$SYSTEMD_UNIT_DIR/$CLIENT_SERVICE"
@@ -45,7 +41,6 @@ SOCKS_ADDRESS="127.0.0.1"
 SOCKS_PORT=""
 SOCKS_USERNAME=""
 LAST_BACKUP_PATH=""
-
 DISC_COUNT=0
 declare -a DISC_ROLE=()
 declare -a DISC_SERVICE=()
@@ -66,14 +61,12 @@ if [[ -t 1 ]]; then
 else
   RED="" GREEN="" YELLOW="" CYAN="" BOLD="" NC=""
 fi
-
 info() { printf '%s[INFO]%s %s\n' "$CYAN" "$NC" "$*"; }
 ok() { printf '%s[OK]%s %s\n' "$GREEN" "$NC" "$*"; }
 warn() { printf '%s[WARN]%s %s\n' "$YELLOW" "$NC" "$*" >&2; }
 error() { printf '%s[ERROR]%s %s\n' "$RED" "$NC" "$*" >&2; }
 hr() { printf '%*s\n' "${COLUMNS:-68}" '' | tr ' ' '-'; }
 pause() { printf '\n'; read -r -p "Press Enter to continue... " _ || true; }
-
 pause_to_menu() {
   printf '\n'
   if [[ -r /dev/tty ]]; then
@@ -89,7 +82,6 @@ banner() {
   printf 'Unified manager for Foreign Endpoint and Iran Client\n'
   hr
 }
-
 require_root() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
     error "This script must be run as root."
@@ -110,7 +102,6 @@ require_platform() {
       exit 1
       ;;
   esac
-
   if ! command -v systemctl >/dev/null 2>&1; then
     error "systemd was not found on this server."
     exit 1
@@ -123,7 +114,6 @@ install_dependencies() {
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   [[ ${#missing[@]} -eq 0 ]] && return 0
-
   info "Installing required tools..."
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y || return 1
@@ -135,7 +125,6 @@ install_dependencies() {
     return 1
   fi
 }
-
 install_manager_source() {
   local src="$1" install_dir src_real dst_real tmp src_size tmp_size
 
@@ -143,7 +132,6 @@ install_manager_source() {
     error "Manager installation source is not a readable regular file: ${src:-missing}"
     return 1
   fi
-
   src_real="$(readlink -m -- "$src" 2>/dev/null || printf '%s' "$src")"
   dst_real="$(readlink -m -- "$INSTALL_PATH" 2>/dev/null || printf '%s' "$INSTALL_PATH")"
   if [[ "$src_real" == "$dst_real" ]]; then
@@ -157,7 +145,6 @@ install_manager_source() {
     fi
     return 0
   fi
-
   if [[ ! -s "$src" ]]; then
     error "Manager installation refused an empty source file: $src"
     return 1
@@ -171,7 +158,6 @@ install_manager_source() {
     error "Manager installation refused a file that does not look like TrustTunnel Manager: $src"
     return 1
   fi
-
   install_dir="$(dirname "$INSTALL_PATH")"
   if ! install -d -m 0755 "$install_dir"; then
     error "Could not create the manager installation directory: $install_dir"
@@ -187,7 +173,6 @@ install_manager_source() {
     error "Could not copy the manager into its temporary installation file."
     return 1
   fi
-
   src_size="$(stat -c '%s' -- "$src" 2>/dev/null || printf '0')"
   tmp_size="$(stat -c '%s' -- "$tmp" 2>/dev/null || printf '0')"
   if [[ "$src_size" == "0" || "$tmp_size" != "$src_size" || ! -s "$tmp" ]]; then
@@ -211,9 +196,6 @@ install_manager_source() {
     error "Could not set executable permissions on the temporary manager file."
     return 1
   fi
-
-  # tmp is created in the destination directory, so mv replaces the command
-  # atomically on the same filesystem. The old command is untouched until here.
   if ! mv -f -- "$tmp" "$INSTALL_PATH"; then
     rm -f -- "$tmp"
     error "Could not atomically install the manager command at $INSTALL_PATH"
@@ -226,16 +208,11 @@ install_manager_source() {
 
 install_manager_command() {
   local src="${BASH_SOURCE[0]:-}"
-
-  # When Bash reads the manager from a pipe/process substitution (/dev/fd/*),
-  # the descriptor may already be at EOF by the time this function runs.
-  # Never copy such a source over the installed command; that could truncate it.
   if [[ -z "$src" || ! -f "$src" || ! -r "$src" ]]; then
     warn "Manager self-install skipped because the running script is not a readable regular file."
     warn "Use main menu option 5 (Install/Update Manager locally) to install it safely."
     return 0
   fi
-
   install_manager_source "$src"
 }
 
@@ -247,7 +224,6 @@ install_manager_from_url() {
     error "Could not create a temporary file for the manager download."
     return 1
   }
-
   info "Downloading TrustTunnel Manager for local installation..."
   if ! curl -fL --connect-timeout 10 --retry 2 --retry-delay 2 -o "$tmp" "$url"; then
     rm -f -- "$tmp"
@@ -265,7 +241,6 @@ install_manager_from_url() {
   ok "Local installation is ready. You can run: trusttunnel-manager"
   return 0
 }
-
 install_manager_locally_menu() {
   banner
   printf '%sInstall/Update Manager Locally%s\n\n' "$BOLD" "$NC"
@@ -282,7 +257,6 @@ confirm() {
   answer="${answer:-$default}"
   [[ "$answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]
 }
-
 ask_value() {
   local prompt="$1" default="${2:-}" value
   while true; do
@@ -299,7 +273,6 @@ ask_value() {
     warn "This value cannot be empty."
   done
 }
-
 ask_secret() {
   local prompt="$1" min_length="${2:-12}" first second
   [[ "$min_length" =~ ^[0-9]+$ ]] || min_length=12
@@ -319,7 +292,6 @@ ask_secret() {
     warn "The passwords do not match."
   done
 }
-
 valid_username() {
   [[ "$1" =~ ^[A-Za-z0-9._@-]{1,64}$ ]]
 }
@@ -335,7 +307,6 @@ ask_username() {
     warn "The username may contain only English letters, numbers, and . _ @ -"
   done
 }
-
 valid_domain() {
   local d="$1"
   [[ ${#d} -le 253 ]] || return 1
@@ -355,7 +326,6 @@ ask_domain() {
     warn "Invalid domain. Example: t1.example.com"
   done
 }
-
 valid_port() {
   [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
 }
@@ -371,7 +341,6 @@ ask_port() {
     warn "The port must be a number between 1 and 65535."
   done
 }
-
 certificate_key_match() {
   local cert="$1" key="$2" cert_fp key_fp
   cert_fp="$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | \
@@ -380,13 +349,11 @@ certificate_key_match() {
     openssl dgst -sha256 2>/dev/null)"
   [[ -n "$cert_fp" && "$cert_fp" == "$key_fp" ]]
 }
-
 select_certificate_path() {
   local domain="$1" input="$2" file choice i count
   local -a valid=() matching=() fullchain_valid=() fullchain_matching=() candidates=()
   [[ "$input" == "root" ]] && input="/root"
   input="$(normalize_path "$input" "/")"
-
   if [[ -f "$input" ]]; then
     if openssl x509 -in "$input" -noout >/dev/null 2>&1; then
       printf '%s' "$input"
@@ -399,7 +366,6 @@ select_certificate_path() {
     error "Certificate path does not exist: $input"
     return 1
   fi
-
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     if openssl x509 -in "$file" -noout >/dev/null 2>&1; then
@@ -413,7 +379,6 @@ select_certificate_path() {
     fi
   done < <(find "$input" -maxdepth 1 -type f \
     \( -iname '*.crt' -o -iname '*.pem' -o -iname '*.cer' \) -print 2>/dev/null | sort)
-
   if (( ${#fullchain_matching[@]} > 0 )); then
     candidates=("${fullchain_matching[@]}")
   elif (( ${#matching[@]} > 0 )); then
@@ -432,7 +397,6 @@ select_certificate_path() {
     printf '%s' "${candidates[0]}"
     return 0
   fi
-
   printf 'Certificate files found in %s:\n' "$input" >&2
   for i in "${!candidates[@]}"; do
     printf '  %d) %s\n' "$((i+1))" "${candidates[$i]}" >&2
@@ -446,13 +410,11 @@ select_certificate_path() {
     warn "Invalid selection."
   done
 }
-
 select_private_key_path() {
   local cert="$1" input="$2" file choice i
   local -a valid=() matching=() candidates=()
   [[ "$input" == "root" ]] && input="/root"
   input="$(normalize_path "$input" "/")"
-
   if [[ -f "$input" ]]; then
     if openssl pkey -in "$input" -noout >/dev/null 2>&1; then
       printf '%s' "$input"
@@ -465,7 +427,6 @@ select_private_key_path() {
     error "Private-key path does not exist: $input"
     return 1
   fi
-
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     if openssl pkey -in "$file" -noout >/dev/null 2>&1; then
@@ -474,7 +435,6 @@ select_private_key_path() {
     fi
   done < <(find "$input" -maxdepth 1 -type f \
     \( -iname '*.key' -o -iname '*.pem' \) -print 2>/dev/null | sort)
-
   if (( ${#matching[@]} > 0 )); then candidates=("${matching[@]}"); else candidates=("${valid[@]}"); fi
   if (( ${#candidates[@]} == 0 )); then
     error "No valid private-key file (.key/.pem) was found in $input."
@@ -485,7 +445,6 @@ select_private_key_path() {
     printf '%s' "${candidates[0]}"
     return 0
   fi
-
   printf 'Private-key files found in %s:\n' "$input" >&2
   for i in "${!candidates[@]}"; do
     printf '  %d) %s\n' "$((i+1))" "${candidates[$i]}" >&2
@@ -499,7 +458,6 @@ select_private_key_path() {
     warn "Invalid selection."
   done
 }
-
 ask_certificate_path() {
   local domain="$1" default="${2:-/root}" input
   input="$(ask_value "Certificate file or directory (.crt/.pem)" "$default")" || return 1
@@ -511,7 +469,6 @@ ask_private_key_path() {
   input="$(ask_value "Private-key file or directory (.key/.pem)" "$default")" || return 1
   select_private_key_path "$cert" "$input"
 }
-
 toml_escape() {
   local value="$1"
   value=${value//\\/\\\\}
@@ -525,7 +482,6 @@ toml_escape() {
 ensure_state_dirs() {
   install -d -m 0700 "$STATE_DIR" "$BACKUP_DIR" "$EXPORT_DIR" "$CLIENT_PROFILES_DIR"
 }
-
 save_state() {
   ensure_state_dirs
   umask 077
@@ -543,7 +499,6 @@ save_state() {
   } > "$STATE_FILE"
   chmod 0600 "$STATE_FILE"
 }
-
 load_state() {
   [[ -f "$STATE_FILE" ]] || return 0
   if [[ "$(stat -c '%u' "$STATE_FILE" 2>/dev/null || echo 1)" != "0" ]]; then
@@ -553,7 +508,6 @@ load_state() {
   # shellcheck disable=SC1090
   source "$STATE_FILE"
 }
-
 normalize_path() {
   local path="${1:-}" base="${2:-/}"
   path="${path%\"}"
@@ -565,7 +519,6 @@ normalize_path() {
     readlink -m -- "$base/$path"
   fi
 }
-
 toml_get() {
   local file="$1" section="$2" key="$3"
   [[ -r "$file" ]] || return 1
@@ -595,12 +548,10 @@ toml_get() {
     }
   ' "$file"
 }
-
 toml_has_section() {
   local file="$1" section="$2"
   [[ -r "$file" ]] && grep -Eq "^[[:space:]]*\\[${section//./\\.}\\][[:space:]]*$" "$file"
 }
-
 remove_toml_section() {
   local input="$1" section="$2" output="$3"
   [[ -r "$input" && -n "$section" && -n "$output" ]] || return 1
@@ -619,7 +570,6 @@ remove_toml_section() {
     !skip { print }
   ' "$input" > "$output"
 }
-
 toml_client_usernames() {
   local file="$1"
   [[ -r "$file" ]] || return 0
@@ -634,7 +584,6 @@ toml_client_usernames() {
     }
   ' "$file" | paste -sd, -
 }
-
 resolve_config_reference() {
   local reference="${1:-}" primary="$2" workdir="${3:-}"
   [[ -n "$reference" ]] || return 0
@@ -656,7 +605,6 @@ reset_discovery() {
   DISC_WORKDIR=()
   DISC_SOURCE=()
 }
-
 discovery_key_exists() {
   local role="$1" primary="$2" binary="$3" i
   for ((i=0; i<DISC_COUNT; i++)); do
@@ -671,7 +619,6 @@ discovery_key_exists() {
   done
   return 1
 }
-
 add_discovered_instance() {
   local role="$1" service="$2" pid="$3" binary="$4" primary="$5"
   local secondary="$6" workdir="$7" source="$8" i
@@ -691,7 +638,6 @@ add_discovered_instance() {
       return 0
     fi
   done
-
   DISC_ROLE[$DISC_COUNT]="$role"
   DISC_SERVICE[$DISC_COUNT]="$service"
   DISC_PID[$DISC_COUNT]="$pid"
@@ -702,7 +648,6 @@ add_discovered_instance() {
   DISC_SOURCE[$DISC_COUNT]="$source"
   DISC_COUNT=$((DISC_COUNT + 1))
 }
-
 parse_service_exec() {
   local service="$1" text line runtime_exec workdir role="" binary="" primary="" secondary=""
   local token expect_config=0
@@ -725,7 +670,6 @@ parse_service_exec() {
   line="${line//\"/}"
   workdir="$(systemctl show "$service" -p WorkingDirectory --value 2>/dev/null || true)"
   [[ -n "$workdir" && "$workdir" != "-" ]] || workdir="/"
-
   local IFS=' '
   read -r -a parts <<< "$line"
   if [[ "$line" == *trusttunnel_endpoint* ]]; then
@@ -759,14 +703,12 @@ parse_service_exec() {
       esac
     done
   fi
-
   binary="$(normalize_path "$binary" "$workdir")"
   primary="$(normalize_path "$primary" "$workdir")"
   secondary="$(normalize_path "$secondary" "$workdir")"
   add_discovered_instance "$role" "$service" "" "$binary" "$primary" \
     "$secondary" "$workdir" "systemd"
 }
-
 discover_systemd_instances() {
   local service unit_file
   local -a units=()
@@ -788,13 +730,11 @@ discover_systemd_instances() {
     systemctl list-units --all --type=service --no-legend --no-pager 2>/dev/null |
       awk '$1 ~ /trusttunnel/ {print $1}'
   )
-
   while IFS= read -r service; do
     [[ -n "$service" ]] || continue
     parse_service_exec "$service" || true
   done < <(printf '%s\n' "${units[@]:-}" | sed '/^$/d' | sort -u)
 }
-
 find_binary_near_config() {
   local role="$1" config="$2" dir name candidate
   dir="$(dirname "$config")"
@@ -804,7 +744,6 @@ find_binary_near_config() {
   done
   return 0
 }
-
 discover_config_files() {
   local file role binary secondary
   local -a roots=()
@@ -812,7 +751,6 @@ discover_config_files() {
   [[ -d /etc ]] && roots+=(/etc)
   [[ -d /root ]] && roots+=(/root)
   [[ ${#roots[@]} -gt 0 ]] || return 0
-
   while IFS= read -r file; do
     role="" binary="" secondary=""
     if grep -Eq '^[[:space:]]*listen_address[[:space:]]*=' "$file" && \
@@ -833,7 +771,6 @@ discover_config_files() {
       ! -path "$BACKUP_DIR/*" 2>/dev/null | sort -u
   )
 }
-
 discover_running_processes() {
   local line pid args role binary primary="" secondary="" token expect_config
   local -a parts=()
@@ -871,7 +808,6 @@ discover_running_processes() {
       "/proc/$pid/cwd" "process"
   done < <(ps -eo pid=,args= 2>/dev/null | awk '/trusttunnel_(endpoint|client)/ {$1=$1; print}')
 }
-
 discover_installations() {
   reset_discovery
   discover_systemd_instances
@@ -880,7 +816,6 @@ discover_installations() {
 }
 
 timestamp() { date '+%Y%m%d-%H%M%S-%N'; }
-
 backup_endpoint() {
   [[ -d "$ENDPOINT_DIR" || -f "$ENDPOINT_UNIT" ]] || return 0
   local dst="$BACKUP_DIR/endpoint-$(timestamp)"
@@ -893,7 +828,6 @@ backup_endpoint() {
   [[ -f "$STATE_FILE" ]] && cp -a "$STATE_FILE" "$dst/"
   ok "Previous endpoint configuration backed up to: $dst"
 }
-
 backup_client() {
   [[ -d "$CLIENT_DIR" || -f "$CLIENT_UNIT" ]] || return 0
   local dst="$BACKUP_DIR/client-$(timestamp)"
@@ -906,7 +840,6 @@ backup_client() {
   [[ -f "$STATE_FILE" ]] && cp -a "$STATE_FILE" "$dst/"
   ok "Previous client configuration backed up to: $dst"
 }
-
 download_and_run_installer() {
   local url="$1" label="$2" tmp rc
   shift 2
@@ -922,7 +855,6 @@ download_and_run_installer() {
   rm -f "$tmp"
   return "$rc"
 }
-
 certificate_count() {
   grep -c -- '-----BEGIN CERTIFICATE-----' "$1" 2>/dev/null || true
 }
@@ -932,7 +864,6 @@ verify_certificate() {
 
   [[ -r "$cert" ]] || { error "Certificate file is not readable: $cert"; return 1; }
   [[ -r "$key" ]] || { error "Private key file is not readable: $key"; return 1; }
-
   if ! openssl x509 -in "$cert" -noout >/dev/null 2>&1; then
     error "The CRT/PEM file does not contain a valid certificate."
     return 1
@@ -950,7 +881,6 @@ verify_certificate() {
     error "Domain $domain is not covered by the certificate SAN/CN."
     return 1
   fi
-
   cert_fp="$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null | \
     openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 2>/dev/null)"
   key_fp="$(openssl pkey -in "$key" -pubout -outform DER 2>/dev/null | \
@@ -959,13 +889,11 @@ verify_certificate() {
     error "The certificate and private key do not match."
     return 1
   fi
-
   count="$(certificate_count "$cert")"
   if (( count < 2 )); then
     error "The certificate file contains only the leaf certificate. A full chain is required."
     return 1
   fi
-
   tmp="$(mktemp -d)" || return 1
   awk -v dir="$tmp" '
     /-----BEGIN CERTIFICATE-----/ { n++ }
@@ -987,7 +915,6 @@ verify_certificate() {
     fi
   fi
   rm -rf "$tmp"
-
   ok "The certificate is valid, covers the domain, and matches the private key."
   openssl x509 -in "$cert" -noout -subject -issuer -dates | sed 's/^/  /'
   return 0
@@ -1001,7 +928,6 @@ check_domain_dns() {
     return 1
   fi
   info "Domain IPv4: $resolved"
-
   public_ip="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
   if [[ -n "$public_ip" ]]; then
     info "Server public IPv4: $public_ip"
@@ -1015,7 +941,6 @@ check_domain_dns() {
   fi
   return 0
 }
-
 endpoint_port_users() {
   local port="$1"
   ss -H -lntup 2>/dev/null | grep -E ":(${port})([[:space:]]|$)" || true
@@ -1032,7 +957,6 @@ suggest_endpoint_ports() {
     endpoint_port_is_free "$port" && printf '%s\n' "$port"
   done
 }
-
 choose_endpoint_port() {
   local preferred="${1:-443}" users choice default
   local -a suggestions=()
@@ -1046,7 +970,6 @@ choose_endpoint_port() {
   error "TCP or UDP port $preferred is already in use:" >&2
   printf '%s\n' "$users" >&2
   warn "The manager will not stop Xray/3x-ui or another service automatically." >&2
-
   mapfile -t suggestions < <(suggest_endpoint_ports)
   if (( ${#suggestions[@]} > 0 )); then
     printf 'Suggested free endpoint ports: %s\n' "$(printf '%s ' "${suggestions[@]}")" >&2
@@ -1054,7 +977,6 @@ choose_endpoint_port() {
   else
     default="9443"
   fi
-
   while true; do
     choice="$(ask_port "Endpoint TLS port" "$default")" || return 1
     if endpoint_port_is_free "$choice"; then
@@ -1065,7 +987,6 @@ choose_endpoint_port() {
     endpoint_port_users "$choice" >&2
   done
 }
-
 ensure_endpoint_port_free() {
   local port="${1:-443}" users
   users="$(endpoint_port_users "$port")"
@@ -1076,7 +997,6 @@ ensure_endpoint_port_free() {
   fi
   ok "TCP and UDP port $port are free."
 }
-
 write_endpoint_hosts() {
   local domain="$1" cert="$2" key="$3"
   umask 077
@@ -1087,7 +1007,6 @@ write_endpoint_hosts() {
     printf 'private_key_path = "%s"\n' "$(toml_escape "$key")"
   } > "$ENDPOINT_DIR/hosts.toml"
 }
-
 write_endpoint_credentials() {
   local username="$1" password="$2"
   umask 077
@@ -1100,11 +1019,10 @@ write_endpoint_credentials() {
 
 generate_endpoint_config() {
   local domain="$1" cert="$2" key="$3" port="$4" username="$5" password="$6"
+  local route_mode="${7:-direct}" route_port="${8:-}"
   local log="$STATE_DIR/endpoint-wizard.log" rc=0 bootstrap_password
-
   rm -f "$ENDPOINT_DIR/vpn.toml" "$ENDPOINT_DIR/hosts.toml" \
     "$ENDPOINT_DIR/credentials.toml" "$ENDPOINT_DIR/rules.toml"
-
   info "Generating endpoint configuration..."
   info "If the official wizard stalls at its TLS stage, the manager will continue automatically after ${ENDPOINT_WIZARD_TIMEOUT}s."
   # The final endpoint password must not appear in setup_wizard's process arguments.
@@ -1125,7 +1043,6 @@ generate_endpoint_config() {
       --cert-key-path "$key"
   ) > "$log" 2>&1 || rc=$?
   unset bootstrap_password
-
   if [[ ! -s "$ENDPOINT_DIR/vpn.toml" ]]; then
     error "The setup wizard could not create vpn.toml."
     tail -n 20 "$log" 2>/dev/null || true
@@ -1135,7 +1052,10 @@ generate_endpoint_config() {
   if [[ $rc -ne 0 ]]; then
     warn "The wizard did not finish its TLS stage. hosts.toml will be created using the official format."
   fi
-
+  if ! set_endpoint_forward_protocol_file "$ENDPOINT_DIR/vpn.toml" "$route_mode" "$route_port"; then
+    error "Could not configure endpoint forward_protocol."
+    return 1
+  fi
   write_endpoint_credentials "$username" "$password"
   write_endpoint_hosts "$domain" "$cert" "$key"
   [[ -f "$ENDPOINT_DIR/rules.toml" ]] || : > "$ENDPOINT_DIR/rules.toml"
@@ -1150,7 +1070,6 @@ validate_endpoint_runtime() {
     timeout --signal=INT --kill-after=2s 5s \
       ./trusttunnel_endpoint vpn.toml hosts.toml --loglvl info
   ) > "$log" 2>&1 || rc=$?
-
   if grep -Eq "Listening to TCP .*:${port}([^0-9]|$)" "$log" && \
      grep -Eq "Listening to UDP .*:${port}([^0-9]|$)" "$log"; then
     ok "Endpoint test passed. TCP and UDP are ready on port $port."
@@ -1162,7 +1081,6 @@ validate_endpoint_runtime() {
   [[ $rc -eq 0 ]] || true
   return 1
 }
-
 write_endpoint_unit() {
   umask 077
   command cat > "$ENDPOINT_UNIT" <<EOF
@@ -1179,7 +1097,6 @@ ExecStart=$ENDPOINT_DIR/trusttunnel_endpoint $ENDPOINT_DIR/vpn.toml $ENDPOINT_DI
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -1187,7 +1104,6 @@ EOF
   systemctl daemon-reload
   systemctl enable "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
 }
-
 start_endpoint() {
   if ! systemctl restart "$ENDPOINT_SERVICE"; then
     error "The endpoint service failed to start."
@@ -1202,7 +1118,6 @@ start_endpoint() {
   fi
   ok "The endpoint service is active and enabled at boot."
 }
-
 test_endpoint_tls() {
   local domain="$1" port="${2:-443}" output
   output="$(timeout 8s openssl s_client \
@@ -1218,7 +1133,6 @@ test_endpoint_tls() {
   grep -E 'verify error|Verify return code|subject=|issuer=' <<< "$output" || true
   return 1
 }
-
 validate_client_export() {
   local file="$1" expected_username="${2:-}" section=""
   local hostname addresses username password
@@ -1231,7 +1145,6 @@ validate_client_export() {
     error "The Endpoint returned a deep link instead of TOML. Check Endpoint support for --format toml."
     return 1
   fi
-
   # Current Endpoint releases export flat TOML. Older or converted files may
   # use an [endpoint] section, so accept both layouts.
   toml_has_section "$file" "endpoint" && section="endpoint"
@@ -1239,7 +1152,6 @@ validate_client_export() {
   addresses="$(toml_get "$file" "$section" "addresses" 2>/dev/null || true)"
   username="$(toml_get "$file" "$section" "username" 2>/dev/null || true)"
   password="$(toml_get "$file" "$section" "password" 2>/dev/null || true)"
-
   [[ -n "$hostname" ]] || missing+=(hostname)
   [[ -n "$addresses" && "$addresses" != "[]" ]] || missing+=(addresses)
   [[ -n "$username" ]] || missing+=(username)
@@ -1254,7 +1166,6 @@ validate_client_export() {
   fi
   return 0
 }
-
 export_client_toml() {
   local username="${1:-$ENDPOINT_USERNAME}" port="${2:-}" tmp listen
   [[ -x "$ENDPOINT_DIR/trusttunnel_endpoint" ]] || {
@@ -1273,7 +1184,6 @@ export_client_toml() {
   fi
   valid_port "$port" || port="${ENDPOINT_PORT:-443}"
   valid_port "$port" || port="443"
-
   tmp="$(mktemp)" || return 1
   if ! (
     cd "$ENDPOINT_DIR" &&
@@ -1295,11 +1205,9 @@ export_client_toml() {
   ok "The Iran client export TOML was created: $ENDPOINT_EXPORT"
   warn "This file contains the endpoint password. Never publish it or upload it to GitHub."
 }
-
 copy_endpoint_export_to_root() {
   local source="${1:-$ENDPOINT_EXPORT}" target="${2:-$ROOT_ENDPOINT_EXPORT}"
   [[ -s "$source" ]] || { error "The current client export does not exist: $source"; return 1; }
-
   printf '\nCurrent client TOML: %s\n' "$source"
   if [[ -f "$target" ]]; then
     warn "A file already exists at $target and may belong to an older configuration."
@@ -1313,7 +1221,6 @@ copy_endpoint_export_to_root() {
       return 0
     fi
   fi
-
   install -m 0600 "$source" "$target" || { error "Could not copy the client TOML to $target"; return 1; }
   ok "Client TOML copied to: $target"
   warn "The TOML contains the Endpoint password. Keep it root-only and transfer it securely."
@@ -1326,7 +1233,6 @@ credentials_has_username() {
   done < <(toml_client_usernames "$file" | tr ',' '\n')
   return 1
 }
-
 transform_credential_block() {
   local file="$1" action="$2" username="$3" password="${4:-}"
   local tmp replacement_file rc=0
@@ -1335,7 +1241,6 @@ transform_credential_block() {
   if [[ "$action" == "password" ]]; then
     printf 'password = "%s"\n' "$(toml_escape "$password")" > "$replacement_file"
   fi
-
   awk -v target="$username" -v action="$action" -v replacement_file="$replacement_file" '
     BEGIN {
       replacement=""
@@ -1400,7 +1305,6 @@ transform_credential_block() {
   install -m 0600 "$tmp" "$file"
   rm -f "$tmp"
 }
-
 select_endpoint_username() {
   local credentials="$1" choice i
   local -a users=()
@@ -1422,7 +1326,6 @@ select_endpoint_username() {
     warn "Invalid selection."
   done
 }
-
 restart_after_credentials_change() {
   local index="$1" backup="$2" credentials="$3"
   if restart_discovered_instance "$index"; then
@@ -1437,7 +1340,6 @@ restart_after_credentials_change() {
   fi
   return 1
 }
-
 add_endpoint_client_account() {
   local index="$1" credentials username password backup
   credentials="$(instance_endpoint_credentials_file "$index")"
@@ -1467,7 +1369,6 @@ add_endpoint_client_account() {
   fi
   pause
 }
-
 change_endpoint_client_password() {
   local index="$1" credentials username password backup
   credentials="$(instance_endpoint_credentials_file "$index")"
@@ -1488,7 +1389,6 @@ change_endpoint_client_password() {
   warn "Any old export file for $username is now invalid. Generate and transfer a new one."
   pause
 }
-
 remove_endpoint_client_account() {
   local index="$1" credentials username backup count
   credentials="$(instance_endpoint_credentials_file "$index")"
@@ -1512,7 +1412,6 @@ remove_endpoint_client_account() {
   ok "Client account removed: $username"
   pause
 }
-
 export_instance_client_toml() {
   local index="$1" username="${2:-}" binary primary secondary workdir domain listen port output tmp
   binary="${DISC_BINARY[$index]:-}"
@@ -1546,7 +1445,6 @@ export_instance_client_toml() {
   ok "Client export created: $output"
   warn "This file contains a password. Transfer it securely and never publish it."
 }
-
 manage_endpoint_client_accounts() {
   local index="$1" credentials choice
   while true; do
@@ -1574,15 +1472,14 @@ manage_endpoint_client_accounts() {
     esac
   done
 }
-
 configure_endpoint() {
   local domain cert key port username password was_active=0 existing_users account_count=0
+  local route_mode current_route_mode current_route_port route_port=""
   banner
   printf '%sForeign Server Setup (Endpoint)%s\n\n' "$BOLD" "$NC"
   info "Port 443 is preferred, but a different free TCP/UDP port can be used."
   warn "This manager will not stop Xray/3x-ui or another service automatically."
   printf '\n'
-
   if [[ -f "$ENDPOINT_DIR/credentials.toml" ]]; then
     existing_users="$(toml_client_usernames "$ENDPOINT_DIR/credentials.toml")"
     account_count="$(tr ',' '\n' <<< "$existing_users" | sed '/^$/d' | wc -l)"
@@ -1592,23 +1489,24 @@ configure_endpoint() {
       confirm "Continue with full Endpoint reconfiguration?" "n" || return 0
     fi
   fi
-
   domain="$(ask_domain "$DOMAIN")" || return 1
   cert="$(ask_certificate_path "$domain" "${CERT_PATH:-/root}")" || { pause; return 1; }
   key="$(ask_private_key_path "$cert" "${KEY_PATH:-$(dirname "$cert")}")" || { pause; return 1; }
 
   verify_certificate "$domain" "$cert" "$key" || { pause; return 1; }
   check_domain_dns "$domain" || { pause; return 1; }
-
   username="$(ask_username "Endpoint username" "$ENDPOINT_USERNAME")" || return 1
   password="$(ask_secret "Endpoint password (input is hidden)")" || return 1
+
+  current_route_mode="$(endpoint_forward_mode_from_file "$ENDPOINT_DIR/vpn.toml")"
+  current_route_port="$(endpoint_forward_socks_port_from_file "$ENDPOINT_DIR/vpn.toml" 2>/dev/null || true)"
+  route_mode="$(choose_endpoint_route_mode "$current_route_mode")" || { unset password; return 1; }
 
   if systemctl is-active --quiet "$ENDPOINT_SERVICE" 2>/dev/null; then
     was_active=1
     info "The current TrustTunnel service will be stopped temporarily for reconfiguration."
     systemctl stop "$ENDPOINT_SERVICE" || return 1
   fi
-
   port="$(choose_endpoint_port "${ENDPOINT_PORT:-443}")" || {
     (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
     unset password
@@ -1625,7 +1523,15 @@ configure_endpoint() {
   if [[ "$port" != "443" ]]; then
     warn "Make sure TCP/$port and UDP/$port are allowed by the server firewall and provider security rules."
   fi
-
+  if [[ "$route_mode" == "socks5" ]]; then
+    route_port="$(choose_endpoint_upstream_socks_port "${current_route_port:-1080}" "$port")" || {
+      (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
+      unset password
+      pause
+      return 1
+    }
+    info "Endpoint egress will use local SOCKS5 at 127.0.0.1:$route_port"
+  fi
   backup_endpoint
   if ! download_and_run_installer "$ENDPOINT_INSTALL_URL" "TrustTunnel Endpoint"; then
     (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
@@ -1639,8 +1545,7 @@ configure_endpoint() {
     pause
     return 1
   fi
-
-  generate_endpoint_config "$domain" "$cert" "$key" "$port" "$username" "$password" || {
+  generate_endpoint_config "$domain" "$cert" "$key" "$port" "$username" "$password" "$route_mode" "$route_port" || {
     unset password
     pause
     return 1
@@ -1661,7 +1566,6 @@ configure_endpoint() {
   SOCKS_PORT=""
   SOCKS_USERNAME=""
   save_state
-
   test_endpoint_tls "$domain" "$port" || true
   export_client_toml "$username" "$port" || { pause; return 1; }
 
@@ -1669,11 +1573,16 @@ configure_endpoint() {
   hr
   ok "Foreign endpoint setup is complete."
   printf 'Endpoint port : %s (TCP/UDP)\n' "$port"
+  if [[ "$route_mode" == "socks5" ]]; then
+    printf 'Route         : SOCKS5 -> 127.0.0.1:%s\n' "$route_port"
+    printf '3x-ui inbound : SOCKS, Listen IP 127.0.0.1, UDP ON, Password OFF\n'
+  else
+    printf 'Route         : Direct\n'
+  fi
   printf 'Client TOML   : %s\n' "$ENDPOINT_EXPORT"
   printf 'Wizard log    : %s\n' "$STATE_DIR/endpoint-wizard.log"
   printf 'Runtime log   : %s\n' "$STATE_DIR/endpoint-test.log"
   printf '\nThe screen will stay here so you can review the installation result.\n'
-
   copy_endpoint_export_to_root "$ENDPOINT_EXPORT" "$ROOT_ENDPOINT_EXPORT" || true
 
   printf '\nNext steps:\n'
@@ -1681,15 +1590,16 @@ configure_endpoint() {
   printf '2) Put it under /root on the Iran server for easy discovery.\n'
   printf '3) Run this manager on the Iran server and select Iran Client.\n'
   printf '4) Add more client accounts later from: Manage installation > Endpoint accounts.\n'
+  if [[ "$route_mode" == "socks5" ]]; then
+    printf '5) In 3x-ui create a dedicated SOCKS inbound on 127.0.0.1:%s, enable UDP, and keep Password OFF.\n' "$route_port"
+  fi
   pause_to_menu
 }
-
 find_endpoint_toml() {
   local input path choice i
   local -a files=()
   input="$(ask_value "Path to the TOML file or its directory" "/root")" || return 1
   [[ "$input" == "root" ]] && input="/root"
-
   if [[ -f "$input" ]]; then
     path="$input"
   elif [[ -d "$input" ]]; then
@@ -1721,7 +1631,6 @@ find_endpoint_toml() {
     error "Path does not exist: $input"
     return 1
   fi
-
   if ! validate_client_export "$path"; then
     error "The selected file does not look like a valid TrustTunnel endpoint export."
     return 1
@@ -1737,7 +1646,6 @@ strip_listener_sections() {
     !skip { print }
   ' "$input" > "$output"
 }
-
 set_killswitch_false() {
   local file="$1" tmp
   if grep -Eq '^[[:space:]]*killswitch_enabled[[:space:]]*=' "$file"; then
@@ -1749,7 +1657,6 @@ set_killswitch_false() {
     mv "$tmp" "$file"
   fi
 }
-
 prepare_socks_config() {
   local source="$1" target="$2" address="$3" port="$4" username="$5" password="$6"
   strip_listener_sections "$source" "$target" || return 1
@@ -1762,7 +1669,6 @@ prepare_socks_config() {
   } >> "$target"
   chmod 0600 "$target"
 }
-
 prepare_tun_config() {
   local source="$1" target="$2"
   cp "$source" "$target"
@@ -1774,7 +1680,353 @@ port_listener() {
   local port="$1"
   ss -H -lntp 2>/dev/null | grep -E ":(${port})([[:space:]]|$)" || true
 }
+# --- TrustTunnel endpoint route management (Direct/SOCKS5) ---
+endpoint_forward_mode_from_file() {
+  local file="${1:-}"
+  if [[ -r "$file" ]] && toml_has_section "$file" "forward_protocol.socks5"; then
+    printf 'socks5'
+  else
+    # TrustTunnel defaults to direct when forward_protocol is omitted.
+    printf 'direct'
+  fi
+}
 
+endpoint_forward_socks_address_from_file() {
+  local file="${1:-}"
+  toml_get "$file" "forward_protocol.socks5" "address" 2>/dev/null || true
+}
+
+endpoint_forward_socks_port_from_file() {
+  local address
+  address="$(endpoint_forward_socks_address_from_file "${1:-}")"
+  [[ "$address" == 127.0.0.1:* ]] || return 1
+  printf '%s' "${address##*:}"
+}
+
+strip_endpoint_forward_protocol_sections() {
+  local input="$1" output="$2"
+  awk '
+    function section_name(line, name) {
+      name=line
+      sub(/^[[:space:]]*\[/, "", name)
+      sub(/\][[:space:]]*$/, "", name)
+      return name
+    }
+    /^[[:space:]]*\[[^][]+\][[:space:]]*$/ {
+      section=section_name($0)
+      skip=(section == "forward_protocol" || section == "forward_protocol.socks5")
+      if (!skip) print
+      next
+    }
+    !skip { print }
+  ' "$input" > "$output"
+}
+
+set_endpoint_forward_protocol_file() {
+  local file="$1" mode="${2:-direct}" port="${3:-}" tmp
+  [[ -f "$file" ]] || { error "Endpoint configuration was not found: $file"; return 1; }
+  case "$mode" in
+    direct) ;;
+    socks5)
+      valid_port "$port" || { error "Invalid local SOCKS5 port: ${port:-missing}"; return 1; }
+      ;;
+    *)
+      error "Unknown endpoint route mode: $mode"
+      return 1
+      ;;
+  esac
+
+  tmp="$(mktemp "$(dirname "$file")/.vpn-route.XXXXXX")" || return 1
+  if ! strip_endpoint_forward_protocol_sections "$file" "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+
+  {
+    printf '\n'
+    if [[ "$mode" == "direct" ]]; then
+      printf '[forward_protocol]\n'
+      printf 'direct = {}\n'
+    else
+      printf '[forward_protocol.socks5]\n'
+      printf 'address = "127.0.0.1:%s"\n' "$port"
+      printf 'extended_auth = false\n'
+    fi
+  } >> "$tmp"
+
+  if ! install -m 0600 "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
+}
+
+endpoint_socks_listener_lines() {
+  local port="$1"
+  # With both TCP and UDP selected, ss includes the protocol column and the
+  # local address is field 5. Match the numeric port exactly.
+  ss -H -lntup 2>/dev/null | awk -v wanted="$port" '
+    {
+      addr=$5
+      n=split(addr, parts, ":")
+      if (n > 1 && parts[n] == wanted) print
+    }
+  '
+}
+
+endpoint_socks_listener_is_loopback_only() {
+  local port="$1" lines line local_addr host ipv4_found=0
+  lines="$(endpoint_socks_listener_lines "$port")"
+  [[ -n "$lines" ]] || return 2
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local_addr="$(awk '{print $5}' <<< "$line")"
+    host="${local_addr%:$port}"
+    case "$host" in
+      127.0.0.1) ipv4_found=1 ;;
+      \[::1\]|::1) : ;;
+      *)
+        error "Unsafe listener on SOCKS port $port: $local_addr"
+        error "The 3x-ui/Xray SOCKS inbound must listen only on loopback, never 0.0.0.0/*/a public IP."
+        return 1
+        ;;
+    esac
+  done <<< "$lines"
+  if (( ipv4_found != 1 )); then
+    error "Port $port is loopback-only, but no 127.0.0.1 listener was found."
+    error "TrustTunnel is intentionally configured to use 127.0.0.1:$port, so set the 3x-ui/Xray Listen IP to 127.0.0.1."
+    return 1
+  fi
+  return 0
+}
+
+endpoint_socks_listener_looks_like_xray() {
+  local port="$1" lines
+  lines="$(endpoint_socks_listener_lines "$port")"
+  [[ -n "$lines" ]] || return 1
+  grep -Eiq 'xray|x-ui|3x-ui' <<< "$lines"
+}
+
+choose_endpoint_route_mode() {
+  local current="${1:-direct}" choice default_choice=1
+  [[ "$current" == "socks5" ]] && default_choice=2
+  printf '\nEndpoint traffic route:\n' >&2
+  printf '  1) Direct Internet\n' >&2
+  printf '  2) Local SOCKS5 via 3x-ui/Xray (127.0.0.1 only)\n' >&2
+  while true; do
+    read -r -p "Select [$default_choice]: " choice || return 1
+    choice="${choice:-$default_choice}"
+    case "$choice" in
+      1) printf 'direct'; return 0 ;;
+      2) printf 'socks5'; return 0 ;;
+      *) warn "Invalid option." ;;
+    esac
+  done
+}
+
+choose_endpoint_upstream_socks_port() {
+  local default="${1:-1080}" endpoint_port="${2:-}" choice lines rc
+  valid_port "$default" || default="1080"
+  while true; do
+    choice="$(ask_port "Local 3x-ui/Xray SOCKS5 port" "$default")" || return 1
+    if [[ -n "$endpoint_port" && "$choice" == "$endpoint_port" ]]; then
+      error "Port $choice is already reserved for the TrustTunnel endpoint itself." >&2
+      default="$((10#$choice < 65535 ? 10#$choice + 1 : 1080))"
+      continue
+    fi
+
+    lines="$(endpoint_socks_listener_lines "$choice")"
+    if [[ -z "$lines" ]]; then
+      warn "Port $choice is currently free. Configure the 3x-ui/Xray SOCKS inbound on 127.0.0.1:$choice before sending traffic through this route." >&2
+      printf '%s' "$choice"
+      return 0
+    fi
+
+    endpoint_socks_listener_is_loopback_only "$choice"
+    rc=$?
+    if (( rc != 0 )); then
+      printf '%s\n' "$lines" >&2
+      warn "Choose a different SOCKS port after fixing/removing the conflicting listener." >&2
+      default="$((10#$choice < 65535 ? 10#$choice + 1 : 1080))"
+      continue
+    fi
+
+    if endpoint_socks_listener_looks_like_xray "$choice"; then
+      ok "Detected an existing loopback-only Xray/3x-ui listener on port $choice." >&2
+      printf '%s' "$choice"
+      return 0
+    fi
+
+    error "Port $choice is already in use by a local process that is not recognized as Xray/3x-ui:" >&2
+    printf '%s\n' "$lines" >&2
+    warn "Choose another port. This prevents TrustTunnel from accidentally forwarding into an unrelated service." >&2
+    default="$((10#$choice < 65535 ? 10#$choice + 1 : 1080))"
+  done
+}
+
+show_endpoint_route_status_file() {
+  local primary="$1" mode address port lines rc
+  mode="$(endpoint_forward_mode_from_file "$primary")"
+  if [[ "$mode" == "direct" ]]; then
+    printf 'Route mode     : Direct\n'
+    printf 'Endpoint egress: TrustTunnel connects directly to destination hosts.\n'
+    return 0
+  fi
+
+  address="$(endpoint_forward_socks_address_from_file "$primary")"
+  port="${address##*:}"
+  printf 'Route mode     : SOCKS5\n'
+  printf 'SOCKS upstream : %s\n' "${address:-missing}"
+  if [[ "$address" != 127.0.0.1:* ]] || ! valid_port "$port"; then
+    error "Unsafe or invalid SOCKS upstream. This manager only permits 127.0.0.1:<port>."
+    return 1
+  fi
+
+  lines="$(endpoint_socks_listener_lines "$port")"
+  if [[ -z "$lines" ]]; then
+    warn "Nothing is currently listening on 127.0.0.1:$port."
+    printf 'Create a SOCKS inbound in 3x-ui/Xray with Listen IP 127.0.0.1 and this port.\n'
+    return 0
+  fi
+
+  endpoint_socks_listener_is_loopback_only "$port"
+  rc=$?
+  if (( rc == 0 )); then
+    ok "Runtime listener security: loopback-only. It is not directly reachable from the Internet/LAN."
+  else
+    printf '%s\n' "$lines"
+    return 1
+  fi
+  printf 'Listener(s):\n%s\n' "$lines"
+}
+
+test_endpoint_local_socks() {
+  local primary="$1" mode address port exit_ip
+  mode="$(endpoint_forward_mode_from_file "$primary")"
+  if [[ "$mode" != "socks5" ]]; then
+    error "Endpoint route is Direct. Switch it to SOCKS5 first."
+    return 1
+  fi
+  address="$(endpoint_forward_socks_address_from_file "$primary")"
+  port="${address##*:}"
+  if [[ "$address" != 127.0.0.1:* ]] || ! valid_port "$port"; then
+    error "Refusing to test a non-loopback/invalid SOCKS upstream: ${address:-missing}"
+    return 1
+  fi
+  if [[ -z "$(endpoint_socks_listener_lines "$port")" ]]; then
+    error "Nothing is listening on $address. Create/start the 3x-ui/Xray SOCKS inbound first."
+    return 1
+  fi
+  endpoint_socks_listener_is_loopback_only "$port" || return 1
+
+  exit_ip="$(curl -4 -fsS --max-time 15 --socks5-hostname "$address" https://api.ipify.org 2>/dev/null || true)"
+  if [[ -n "$exit_ip" ]]; then
+    ok "SOCKS5 TCP egress test passed. Exit IPv4: $exit_ip"
+    return 0
+  fi
+  warn "The local SOCKS listener is present and loopback-only, but the Internet test failed."
+  warn "Check the 3x-ui inbound, its routing rule/outbound, and Xray logs."
+  return 1
+}
+
+apply_endpoint_route() {
+  local index="$1" mode="$2" port="${3:-}" primary backup service
+  primary="${DISC_PRIMARY[$index]:-}"
+  service="${DISC_SERVICE[$index]:-}"
+  [[ -f "$primary" ]] || { error "Endpoint primary configuration was not found."; return 1; }
+  [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]] || { error "Route management is available only for Endpoint instances."; return 1; }
+
+  backup="$primary.before-route-$(timestamp)"
+  cp -a -- "$primary" "$backup" || return 1
+  if ! set_endpoint_forward_protocol_file "$primary" "$mode" "$port"; then
+    cp -a -- "$backup" "$primary" 2>/dev/null || true
+    return 1
+  fi
+
+  if [[ -n "$service" ]]; then
+    if ! restart_discovered_instance "$index"; then
+      error "The endpoint did not restart with the new route. Restoring the previous configuration."
+      cp -a -- "$backup" "$primary"
+      restart_discovered_instance "$index" || true
+      return 1
+    fi
+  else
+    warn "No systemd service was detected. The configuration was updated, but you must restart this endpoint manually."
+  fi
+
+  if [[ "$mode" == "direct" ]]; then
+    ok "Endpoint route changed to Direct."
+  else
+    ok "Endpoint route changed to SOCKS5 -> 127.0.0.1:$port"
+    printf '\n3x-ui/Xray inbound settings:\n'
+    printf '  Protocol    : SOCKS (preferred; not VLESS/VMess/Trojan)\n'
+    printf '  Listen IP   : 127.0.0.1\n'
+    printf '  Port        : %s\n' "$port"
+    printf '  Enabled UDP : ON\n'
+    printf '  Password    : OFF / noauth\n'
+    printf '  Sniffing    : optional; routing by inbound tag works without it\n'
+  fi
+  printf 'Backup        : %s\n' "$backup"
+  return 0
+}
+
+manage_endpoint_route() {
+  local index="$1" choice primary mode address port default_port listen endpoint_port
+  primary="${DISC_PRIMARY[$index]:-}"
+  [[ -f "$primary" ]] || { error "Endpoint primary configuration was not found."; pause; return 1; }
+  while true; do
+    mode="$(endpoint_forward_mode_from_file "$primary")"
+    address="$(endpoint_forward_socks_address_from_file "$primary")"
+    port="${address##*:}"
+    banner
+    printf '%sManage route (Direct/SOCKS5)%s\n\n' "$BOLD" "$NC"
+    show_endpoint_route_status_file "$primary" || true
+    printf '\n  1) Use Direct route\n'
+    printf '  2) Use local SOCKS5 route (3x-ui/Xray)\n'
+    printf '  3) Show route and listener security\n'
+    printf '  4) Test SOCKS5 egress / show exit IPv4\n'
+    printf '  0) Back\n\n'
+    read -r -p "Select: " choice || return 0
+    case "$choice" in
+      1)
+        if [[ "$mode" == "direct" ]]; then
+          ok "Endpoint route is already Direct."
+          pause
+          continue
+        fi
+        warn "Changing route restarts the endpoint briefly and disconnects active sessions."
+        if confirm "Switch endpoint egress to Direct?" "y"; then
+          apply_endpoint_route "$index" direct || true
+        fi
+        pause
+        ;;
+      2)
+        listen="$(toml_get "$primary" "" "listen_address" 2>/dev/null || true)"
+        endpoint_port="${listen##*:}"
+        [[ "$endpoint_port" =~ ^[0-9]+$ ]] || endpoint_port=""
+        default_port="1080"
+        if [[ "$mode" == "socks5" && "$address" == 127.0.0.1:* ]] && valid_port "$port"; then
+          default_port="$port"
+        fi
+        port="$(choose_endpoint_upstream_socks_port "$default_port" "$endpoint_port")" || { pause; continue; }
+        warn "Changing route restarts the endpoint briefly and disconnects active sessions."
+        if confirm "Route endpoint traffic through 127.0.0.1:$port?" "y"; then
+          apply_endpoint_route "$index" socks5 "$port" || true
+        fi
+        pause
+        ;;
+      3) banner; printf '%sEndpoint Route Status%s\n\n' "$BOLD" "$NC"; show_endpoint_route_status_file "$primary" || true; pause ;;
+      4) test_endpoint_local_socks "$primary" || true; pause ;;
+      0) return 0 ;;
+      *) warn "Invalid option."; sleep 1 ;;
+    esac
+  done
+}
+# --- end endpoint route management ---
+
+# -----------------------------------------------------------------------------
+# Iran-client listener/profile management
+# -----------------------------------------------------------------------------
 socks_config_is_loopback_only() {
   local file="$1" address host
   address="$(toml_get "$file" "listener.socks" "address" 2>/dev/null || true)"
@@ -1824,14 +2076,12 @@ ensure_profile_socks_port_available() {
   local port="$1" profile="$2" users service pid other
   users="$(port_listener "$port")"
   [[ -z "$users" ]] && return 0
-
   service="trusttunnel-client-$profile.service"
   pid="$(systemctl show "$service" -p MainPID --value 2>/dev/null || true)"
   if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
     other="$(grep -v "pid=$pid," <<< "$users" || true)"
     [[ -z "$other" ]] && return 0
   fi
-
   error "Port $port is already in use and cannot be assigned to profile $profile:"
   printf '%s\n' "$users"
   return 1
@@ -1839,7 +2089,7 @@ ensure_profile_socks_port_available() {
 
 write_client_unit() {
   umask 077
-  command cat > "$CLIENT_UNIT" <<EOF
+  command cat > "$CLIENT_UNIT" <<EOF_UNIT
 [Unit]
 Description=TrustTunnel Client
 Wants=network-online.target
@@ -1853,10 +2103,9 @@ ExecStart=$CLIENT_DIR/trusttunnel_client -c $CLIENT_DIR/trusttunnel_client.toml
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
-
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF_UNIT
   chmod 0644 "$CLIENT_UNIT"
   systemctl daemon-reload
   systemctl enable "$CLIENT_SERVICE" >/dev/null 2>&1 || true
@@ -1913,10 +2162,10 @@ choose_client_mode() {
       1) printf 'socks'; return 0 ;;
       2)
         warn "TUN may change the Internet route of the entire Iran server."
-        confirm "Do you understand the risk and still want to use TUN?" "n" && {
+        if confirm "Do you understand the risk and still want to use TUN?" "n"; then
           printf 'tun'
           return 0
-        }
+        fi
         ;;
       *) warn "Invalid option." ;;
     esac
@@ -1952,10 +2201,10 @@ ask_client_profile_name() {
 profile_socks_port_reserved() {
   local port="$1" excluded_profile="${2:-}" file address profile files
   [[ -d "$CLIENT_PROFILES_DIR" ]] || return 1
-  files="$(find "$CLIENT_PROFILES_DIR" -mindepth 2 -maxdepth 2 \
-    -type f -name 'client.toml' 2>/dev/null || true)"
+  files="$(find "$CLIENT_PROFILES_DIR" -mindepth 2 -maxdepth 2 -type f -name 'client.toml' 2>/dev/null || true)"
   [[ -n "$files" ]] || return 1
   while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
     profile="$(basename "$(dirname "$file")")"
     [[ "$profile" == "$excluded_profile" ]] && continue
     address="$(toml_get "$file" "listener.socks" "address" 2>/dev/null || true)"
@@ -1978,8 +2227,7 @@ next_socks_profile_port() {
 
 active_tun_client_exists() {
   local excluded_profile="${1:-}" file service profile files
-  files="$(find "$CLIENT_PROFILES_DIR" -mindepth 2 -maxdepth 2 \
-    -type f -name 'client.toml' 2>/dev/null || true)"
+  files="$(find "$CLIENT_PROFILES_DIR" -mindepth 2 -maxdepth 2 -type f -name 'client.toml' 2>/dev/null || true)"
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     profile="$(basename "$(dirname "$file")")"
@@ -2013,25 +2261,20 @@ rollback_client_profile() {
   local profile_dir="$CLIENT_PROFILES_DIR/$profile"
   local service="trusttunnel-client-$profile.service"
   local unit="$SYSTEMD_UNIT_DIR/$service" backup_unit
-
   warn "Client profile setup failed. Restoring the previous state."
   systemctl disable --now "$service" >/dev/null 2>&1 || true
   if safe_client_profile_directory "$profile_dir" && [[ -d "$profile_dir" ]]; then
     find "$profile_dir" -depth -delete 2>/dev/null || true
   fi
   rm -f -- "$unit"
-
   if [[ "$had_profile" == "1" && -n "$backup_path" ]]; then
-    if [[ -d "$backup_path/profile" ]]; then
-      cp -a -- "$backup_path/profile" "$profile_dir"
-    fi
+    [[ -d "$backup_path/profile" ]] && cp -a -- "$backup_path/profile" "$profile_dir"
     backup_unit="$backup_path/$(basename "$unit")"
     [[ -f "$backup_unit" ]] && cp -a -- "$backup_unit" "$unit"
     systemctl daemon-reload
     [[ -f "$unit" ]] && systemctl enable "$service" >/dev/null 2>&1 || true
     if [[ "$was_active" == "1" ]]; then
-      systemctl start "$service" >/dev/null 2>&1 || \
-        error "The previous profile was restored, but its service could not be restarted."
+      systemctl start "$service" >/dev/null 2>&1 || error "The previous profile was restored, but its service could not be restarted."
     fi
     warn "Previous client profile restored: $profile"
   else
@@ -2045,7 +2288,7 @@ write_profile_client_unit() {
   service="trusttunnel-client-$profile.service"
   unit="$SYSTEMD_UNIT_DIR/$service"
   umask 077
-  command cat > "$unit" <<EOF
+  command cat > "$unit" <<EOF_UNIT
 [Unit]
 Description=TrustTunnel Client Profile: $profile
 Wants=network-online.target
@@ -2059,10 +2302,9 @@ ExecStart=$CLIENT_DIR/trusttunnel_client -c $config
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
-
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF_UNIT
   chmod 0644 "$unit"
   systemctl daemon-reload
   systemctl enable "$service" >/dev/null 2>&1 || true
@@ -2100,7 +2342,6 @@ configure_client_profile() {
     systemctl is-active --quiet "$service" 2>/dev/null && was_active=1
     confirm "Profile $profile already exists. Reconfigure it?" "n" || return 0
   fi
-
   mode="$(choose_client_mode)" || return 1
   if [[ "$mode" == "tun" ]] && active_tun_client_exists "$profile"; then
     error "Another TUN client is already active. Multiple simultaneous TUN profiles are unsafe."
@@ -2140,6 +2381,7 @@ configure_client_profile() {
   wizard_log="$profile_dir/setup-wizard.log"
   install -m 0600 "$endpoint_file" "$imported"
   rm -f "$generated" "$candidate"
+
   if ! (
     cd "$CLIENT_DIR" &&
     ./setup_wizard --mode non-interactive \
@@ -2162,26 +2404,25 @@ configure_client_profile() {
   fi
 
   if [[ "$mode" == "socks" ]]; then
-    prepare_socks_config "$generated" "$candidate" "127.0.0.1" \
-      "$socks_port" "$socks_user" "$socks_password" || {
-        rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
-        unset socks_password
-        pause
-        return 1
-      }
-    socks_config_is_loopback_only "$candidate" || {
+    if ! prepare_socks_config "$generated" "$candidate" "127.0.0.1" "$socks_port" "$socks_user" "$socks_password"; then
       rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
       unset socks_password
-      rm -f "$candidate"
       pause
       return 1
-    }
+    fi
+    if ! socks_config_is_loopback_only "$candidate"; then
+      rm -f "$candidate"
+      rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
+      unset socks_password
+      pause
+      return 1
+    fi
   else
-    prepare_tun_config "$generated" "$candidate" || {
+    if ! prepare_tun_config "$generated" "$candidate"; then
       rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
       pause
       return 1
-    }
+    fi
   fi
 
   systemctl stop "$service" >/dev/null 2>&1 || true
@@ -2193,18 +2434,18 @@ configure_client_profile() {
   fi
   install -m 0600 "$candidate" "$profile_dir/client.toml"
   rm -f "$candidate" "$generated"
-  write_profile_client_unit "$profile" "$profile_dir/client.toml" || {
+  if ! write_profile_client_unit "$profile" "$profile_dir/client.toml"; then
     rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
     unset socks_password
     pause
     return 1
-  }
-  start_profile_client "$profile" || {
+  fi
+  if ! start_profile_client "$profile"; then
     rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
     unset socks_password
     pause
     return 1
-  }
+  fi
 
   ROLE="iran"
   CLIENT_MODE="$mode"
@@ -2213,6 +2454,7 @@ configure_client_profile() {
   SOCKS_USERNAME="$socks_user"
   save_state
 
+  printf '\n'
   if [[ "$mode" == "socks" ]]; then
     test_socks "127.0.0.1" "$socks_port" "$socks_user" "$socks_password" || true
     unset socks_password
@@ -2232,6 +2474,7 @@ configure_client_profile() {
   pause_to_menu
 }
 
+# Kept for compatibility with older single-client installations.
 configure_client() {
   local endpoint_file mode socks_port="" socks_user="" socks_password=""
   local imported="$CLIENT_DIR/endpoint.toml"
@@ -2243,7 +2486,6 @@ configure_client() {
   printf '%sIran Server Setup (Client)%s\n\n' "$BOLD" "$NC"
   endpoint_file="$(find_endpoint_toml)" || { pause; return 1; }
   mode="$(choose_client_mode)" || return 1
-
   if [[ "$mode" == "socks" ]]; then
     socks_port="$(ask_port "Local SOCKS5 port" "${SOCKS_PORT:-27831}")" || return 1
     socks_user="$(ask_username "SOCKS5 username" "$SOCKS_USERNAME")" || return 1
@@ -2254,7 +2496,6 @@ configure_client() {
       return 1
     fi
   fi
-
   backup_client
   if ! download_and_run_installer "$CLIENT_INSTALL_URL" "TrustTunnel Client"; then
     unset socks_password
@@ -2267,14 +2508,11 @@ configure_client() {
     pause
     return 1
   fi
-
   install -m 0600 "$endpoint_file" "$imported"
   rm -f "$generated" "$candidate"
   if ! (
     cd "$CLIENT_DIR" &&
-    ./setup_wizard --mode non-interactive \
-      --endpoint_config "$imported" \
-      --settings "$generated"
+    ./setup_wizard --mode non-interactive --endpoint_config "$imported" --settings "$generated"
   ) > "$wizard_log" 2>&1; then
     error "The endpoint export file could not be imported."
     tail -n 20 "$wizard_log" 2>/dev/null || true
@@ -2288,46 +2526,28 @@ configure_client() {
     pause
     return 1
   fi
-
   if [[ "$mode" == "socks" ]]; then
-    prepare_socks_config "$generated" "$candidate" "127.0.0.1" \
-      "$socks_port" "$socks_user" "$socks_password" || {
-        unset socks_password
-        pause
-        return 1
-      }
+    prepare_socks_config "$generated" "$candidate" "127.0.0.1" "$socks_port" "$socks_user" "$socks_password" || {
+      unset socks_password; pause; return 1;
+    }
     socks_config_is_loopback_only "$candidate" || {
-      unset socks_password
-      rm -f "$candidate"
-      pause
-      return 1
+      unset socks_password; rm -f "$candidate"; pause; return 1;
     }
   else
     prepare_tun_config "$generated" "$candidate" || { pause; return 1; }
   fi
-
   systemctl stop "$CLIENT_SERVICE" >/dev/null 2>&1 || true
   if [[ "$mode" == "socks" ]] && ! ensure_socks_port_available "$socks_port"; then
-    unset socks_password
-    pause
-    return 1
+    unset socks_password; pause; return 1
   fi
   install -m 0600 "$candidate" "$CLIENT_DIR/trusttunnel_client.toml"
   rm -f "$candidate" "$generated"
   write_client_unit || { unset socks_password; pause; return 1; }
   start_client || { unset socks_password; pause; return 1; }
-
   ROLE="iran"
-  DOMAIN=""
-  CERT_PATH=""
-  KEY_PATH=""
-  ENDPOINT_USERNAME=""
-  CLIENT_MODE="$mode"
-  SOCKS_ADDRESS="127.0.0.1"
-  SOCKS_PORT="$socks_port"
-  SOCKS_USERNAME="$socks_user"
+  DOMAIN="" CERT_PATH="" KEY_PATH="" ENDPOINT_USERNAME=""
+  CLIENT_MODE="$mode" SOCKS_ADDRESS="127.0.0.1" SOCKS_PORT="$socks_port" SOCKS_USERNAME="$socks_user"
   save_state
-
   printf '\n'
   if [[ "$mode" == "socks" ]]; then
     test_socks "127.0.0.1" "$socks_port" "$socks_user" "$socks_password" || true
@@ -2335,10 +2555,7 @@ configure_client() {
     hr
     ok "SOCKS setup on the Iran server is complete."
     printf '3x-ui Outbound settings:\n'
-    printf '  Protocol: SOCKS\n'
-    printf '  Address : 127.0.0.1\n'
-    printf '  Port    : %s\n' "$socks_port"
-    printf '  Username: %s\n' "$socks_user"
+    printf '  Protocol: SOCKS\n  Address : 127.0.0.1\n  Port    : %s\n  Username: %s\n' "$socks_port" "$socks_user"
     printf '  Password: use the SOCKS password entered during setup\n'
     printf '  Security: loopback-only (127.0.0.1); not directly reachable from Internet/LAN\n'
   else
@@ -2349,6 +2566,9 @@ configure_client() {
   pause_to_menu
 }
 
+# -----------------------------------------------------------------------------
+# Discovered-installation helpers
+# -----------------------------------------------------------------------------
 instance_service_state() {
   local index="$1" service pid
   service="${DISC_SERVICE[$index]:-}"
@@ -2356,9 +2576,9 @@ instance_service_state() {
   if [[ -n "$service" ]]; then
     systemctl is-active "$service" 2>/dev/null || true
   elif [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    printf 'running (PID %s)' "$pid"
+    printf 'running'
   else
-    printf 'configured only'
+    printf 'inactive'
   fi
 }
 
@@ -2419,7 +2639,7 @@ role_installation_count() {
 }
 
 print_role_installations() {
-  local wanted_role="$1" i number=0 service state credentials users account_count address
+  local wanted_role="$1" i number=0 service state credentials users account_count address route
   for ((i=0; i<DISC_COUNT; i++)); do
     [[ "${DISC_ROLE[$i]:-}" == "$wanted_role" ]] || continue
     number=$((number + 1))
@@ -2429,8 +2649,10 @@ print_role_installations() {
       credentials="$(instance_endpoint_credentials_file "$i")"
       users="$(toml_client_usernames "$credentials")"
       account_count="$(tr ',' '\n' <<< "$users" | sed '/^$/d' | wc -l)"
-      printf '  %d) %-12s | %s | clients: %s | %s\n' \
-        "$number" "$state" "$(instance_summary "$i")" "$account_count" "$service"
+      route="$(endpoint_forward_mode_from_file "${DISC_PRIMARY[$i]:-}")"
+      [[ "$route" == "socks5" ]] && route="SOCKS5" || route="Direct"
+      printf '  %d) %-12s | %s | clients: %s | route: %s | %s\n' \
+        "$number" "$state" "$(instance_summary "$i")" "$account_count" "$route" "$service"
     else
       address="$(toml_get "${DISC_PRIMARY[$i]:-}" "listener.socks" "address" 2>/dev/null || true)"
       [[ -n "$address" ]] || address="system routing"
@@ -2485,7 +2707,6 @@ show_instance_details() {
   secondary="${DISC_SECONDARY[$index]:-}"
   workdir="${DISC_WORKDIR[$index]:-}"
   source="${DISC_SOURCE[$index]:-}"
-
   banner
   printf '%sDetected TrustTunnel Details%s\n\n' "$BOLD" "$NC"
   printf 'Role            : %s\n' "$role"
@@ -2503,7 +2724,6 @@ show_instance_details() {
     printf 'Version         : %s\n' "${version:-unknown}"
   fi
   printf 'Primary config  : %s\n' "${primary:-not found}"
-
   if [[ "$role" == "endpoint" ]]; then
     printf 'TLS hosts config: %s\n' "${secondary:-not found}"
     listen="$(toml_get "$primary" "" "listen_address" 2>/dev/null || true)"
@@ -2523,6 +2743,8 @@ show_instance_details() {
     printf 'Passwords       : hidden\n'
     printf 'Rules file      : %s\n' "${rules:-not configured}"
     printf 'Private networks: %s\n' "${private:-false/default}"
+    printf '\n'
+    show_endpoint_route_status_file "$primary" || true
   else
     endpoint_address="$(toml_get "$primary" "endpoint" "addresses" 2>/dev/null || true)"
     domain="$(toml_get "$primary" "endpoint" "hostname" 2>/dev/null || true)"
@@ -2533,9 +2755,7 @@ show_instance_details() {
       socks_address="$(toml_get "$primary" "listener.socks" "address" 2>/dev/null || true)"
       socks_user="$(toml_get "$primary" "listener.socks" "username" 2>/dev/null || true)"
     else
-      mode="TUN"
-      socks_address=""
-      socks_user=""
+      mode="TUN" socks_address="" socks_user=""
     fi
     printf 'Endpoint hostname: %s\n' "${domain:-unknown}"
     printf 'Endpoint address : %s\n' "${endpoint_address:-unknown}"
@@ -2554,39 +2774,34 @@ backup_discovered_instance() {
   local index="$1" dst file fragment credentials rules profile_dir=""
   dst="$BACKUP_DIR/discovered-$(timestamp)-$((index+1))"
   install -d -m 0700 "$dst"
-  if [[ "${DISC_ROLE[$index]:-}" == "client" && \
-        "${DISC_PRIMARY[$index]:-}" == "$CLIENT_PROFILES_DIR/"*/client.toml ]]; then
+  if [[ "${DISC_ROLE[$index]:-}" == "client" && "${DISC_PRIMARY[$index]:-}" == "$CLIENT_PROFILES_DIR/"*/client.toml ]]; then
     profile_dir="$(dirname "${DISC_PRIMARY[$index]}")"
     if safe_client_profile_directory "$profile_dir"; then
       cp -a -- "$profile_dir" "$dst/profile"
     fi
   fi
-  if [[ -z "$profile_dir" ]]; then
-    for file in "${DISC_PRIMARY[$index]:-}" "${DISC_SECONDARY[$index]:-}"; do
-      [[ -f "$file" ]] && cp -a -- "$file" "$dst/"
-    done
-  fi
+  for file in "${DISC_PRIMARY[$index]:-}" "${DISC_SECONDARY[$index]:-}"; do
+    [[ -f "$file" ]] && cp -a -- "$file" "$dst/"
+  done
   if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
     credentials="$(instance_endpoint_credentials_file "$index")"
     rules="$(instance_endpoint_rules_file "$index")"
-    for file in "$credentials" "$rules"; do
-      [[ -f "$file" ]] && cp -a -- "$file" "$dst/"
-    done
+    [[ -f "$credentials" ]] && cp -a -- "$credentials" "$dst/"
+    [[ -f "$rules" ]] && cp -a -- "$rules" "$dst/"
   fi
   if [[ -n "${DISC_SERVICE[$index]:-}" ]]; then
     fragment="$(systemctl show "${DISC_SERVICE[$index]}" -p FragmentPath --value 2>/dev/null || true)"
     [[ -f "$fragment" ]] && cp -a -- "$fragment" "$dst/"
   fi
-  umask 077
   {
-    printf 'role=%s\n' "${DISC_ROLE[$index]:-}"
-    printf 'service=%s\n' "${DISC_SERVICE[$index]:-}"
-    printf 'binary=%s\n' "${DISC_BINARY[$index]:-}"
-    printf 'primary=%s\n' "${DISC_PRIMARY[$index]:-}"
-    printf 'secondary=%s\n' "${DISC_SECONDARY[$index]:-}"
+    printf 'role=%q\n' "${DISC_ROLE[$index]:-}"
+    printf 'service=%q\n' "${DISC_SERVICE[$index]:-}"
+    printf 'binary=%q\n' "${DISC_BINARY[$index]:-}"
+    printf 'primary=%q\n' "${DISC_PRIMARY[$index]:-}"
+    printf 'secondary=%q\n' "${DISC_SECONDARY[$index]:-}"
   } > "$dst/inventory.txt"
   chmod -R go-rwx "$dst"
-  ok "Backup created: $dst"
+  ok "Configuration backup created: $dst"
 }
 
 restart_discovered_instance() {
@@ -2640,10 +2855,7 @@ select_instance_config_file() {
     [[ -f "$credentials" ]] && { files+=("$credentials"); labels+=("Credentials configuration"); }
     [[ -f "$rules" ]] && { files+=("$rules"); labels+=("Rules configuration"); }
   fi
-  if (( ${#files[@]} == 0 )); then
-    error "No editable configuration files were found."
-    return 1
-  fi
+  if (( ${#files[@]} == 0 )); then error "No editable configuration files were found."; return 1; fi
   printf 'Configuration files:\n' >&2
   for i in "${!files[@]}"; do
     printf '  %d) %s - %s\n' "$((i+1))" "${labels[$i]}" "${files[$i]}" >&2
@@ -2669,7 +2881,6 @@ edit_instance_config() {
   cp -a -- "$file" "$backup_file" || { error "Could not create an edit backup."; pause; return 1; }
   chmod go-rwx "$backup_file" 2>/dev/null || true
   ok "Edit backup: $backup_file"
-
   editor_value="${EDITOR:-}"
   if [[ -z "$editor_value" ]]; then
     if command -v nano >/dev/null 2>&1; then editor_value="nano"; else editor_value="vi"; fi
@@ -2677,27 +2888,18 @@ edit_instance_config() {
   local IFS=' '
   read -r -a editor_command <<< "$editor_value"
   if ! command -v "${editor_command[0]}" >/dev/null 2>&1; then
-    error "Editor not found: ${editor_command[0]}"
-    pause
-    return 1
+    error "Editor not found: ${editor_command[0]}"; pause; return 1
   fi
-  "${editor_command[@]}" "$file" || {
-    error "The editor exited with an error. The original backup is unchanged."
-    pause
-    return 1
-  }
+  "${editor_command[@]}" "$file" || { error "The editor exited with an error. The original backup is unchanged."; pause; return 1; }
   chmod 0600 "$file" 2>/dev/null || true
-
   service="${DISC_SERVICE[$index]:-}"
   if [[ -n "$service" ]]; then
     if restart_discovered_instance "$index"; then
       ok "Configuration edit applied successfully."
-    else
-      if confirm "Restore the configuration backup now?" "y"; then
-        cp -a -- "$backup_file" "$file"
-        systemctl restart "$service" || true
-        warn "The previous configuration was restored."
-      fi
+    elif confirm "Restore the configuration backup now?" "y"; then
+      cp -a -- "$backup_file" "$file"
+      systemctl restart "$service" || true
+      warn "The previous configuration was restored."
     fi
   else
     warn "The file was edited, but no systemd service was detected to restart."
@@ -2715,8 +2917,7 @@ safe_trusttunnel_directory() {
   [[ "$base" != "trusttunnel-manager" ]] || return 1
   case "$real" in
     /opt/*|/etc/*)
-      [[ "$base" == "trusttunnel" || "$base" == "trusttunnel_client" || \
-         "$base" == trusttunnel-* || "$base" == trusttunnel_* ]]
+      [[ "$base" == "trusttunnel" || "$base" == "trusttunnel_client" || "$base" == trusttunnel-* || "$base" == trusttunnel_* ]]
       ;;
     *) return 1 ;;
   esac
@@ -2734,87 +2935,46 @@ safe_client_profile_directory() {
 }
 
 remove_discovered_instance() {
-  local index="$1" service pid fragment install_dir profile_dir="" choice typed same_dir_count=0 i
+  local index="$1" service pid install_dir profile_dir="" choice typed same_dir_count=0 i config_file credentials rules
   service="${DISC_SERVICE[$index]:-}"
   pid="${DISC_PID[$index]:-}"
-  if [[ -n "${DISC_BINARY[$index]:-}" ]]; then
-    install_dir="$(dirname "${DISC_BINARY[$index]}")"
-  else
-    install_dir="$(dirname "${DISC_PRIMARY[$index]:-/}")"
-  fi
-  if [[ -n "${DISC_PRIMARY[$index]:-}" ]] && \
-     [[ "${DISC_PRIMARY[$index]}" == "$CLIENT_PROFILES_DIR/"*/client.toml ]]; then
+  if [[ -n "${DISC_BINARY[$index]:-}" ]]; then install_dir="$(dirname "${DISC_BINARY[$index]}")"; else install_dir="$(dirname "${DISC_PRIMARY[$index]:-/}")"; fi
+  if [[ -n "${DISC_PRIMARY[$index]:-}" && "${DISC_PRIMARY[$index]}" == "$CLIENT_PROFILES_DIR/"*/client.toml ]]; then
     profile_dir="$(dirname "${DISC_PRIMARY[$index]}")"
-    safe_client_profile_directory "$profile_dir" || profile_dir=""
   fi
-
   banner
-  show_instance_details "$index"
-  warn "Removal is destructive. A backup will be created first."
-  printf '  1) Remove/disable the service only; keep all TrustTunnel files\n'
-  printf '  2) Remove the service and this instance configuration'
-  if [[ -n "$profile_dir" ]]; then
-    printf ' (profile directory: %s)' "$profile_dir"
-  elif safe_trusttunnel_directory "$install_dir"; then
-    printf ' (and installation directory when not shared)'
-  fi
-  printf '\n'
-  printf '  0) Cancel\n'
-  read -r -p "Select: " choice || return 1
-  [[ "$choice" == "0" ]] && return 0
-  if [[ "$choice" != "1" && "$choice" != "2" ]]; then
-    warn "Invalid selection."
-    pause
-    return 1
-  fi
-  read -r -p "Type REMOVE to confirm: " typed || return 1
+  warn "You are about to remove: $(instance_summary "$index")"
+  printf 'Role   : %s\nService: %s\nPath   : %s\n\n' "${DISC_ROLE[$index]:-}" "${service:-unmanaged}" "$install_dir"
+  confirm "Create a configuration backup first?" "y" && backup_discovered_instance "$index"
+  read -r -p "Type REMOVE to continue: " typed || return 1
   [[ "$typed" == "REMOVE" ]] || { warn "Removal cancelled."; pause; return 0; }
-
-  backup_discovered_instance "$index"
+  printf '1) Remove service/config only\n2) Also remove detected installation/profile directory when safe\n'
+  read -r -p "Select [1]: " choice || return 1
+  choice="${choice:-1}"
   if [[ "${DISC_ROLE[$index]:-}" == "endpoint" && -n "$service" ]]; then
     remove_endpoint_restart_schedule "$service" 1 || true
   fi
-  if [[ -n "$service" ]]; then
-    systemctl disable --now "$service" >/dev/null 2>&1 || true
-    fragment="$(systemctl show "$service" -p FragmentPath --value 2>/dev/null || true)"
-    if [[ "$fragment" == "$SYSTEMD_UNIT_DIR/"*.service ]]; then
-      rm -f -- "$fragment"
-    else
-      warn "The service unit is outside $SYSTEMD_UNIT_DIR and was disabled but not deleted."
-    fi
-  elif [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    kill -TERM "$pid" 2>/dev/null || true
-  fi
-
+  [[ -n "$service" ]] && systemctl disable --now "$service" >/dev/null 2>&1 || true
+  if [[ -n "$pid" && -z "$service" ]]; then kill "$pid" 2>/dev/null || true; fi
+  [[ -n "$service" ]] && rm -f -- "$SYSTEMD_UNIT_DIR/$service"
   if [[ "$choice" == "2" ]]; then
     if [[ -n "$profile_dir" ]]; then
-      rm -rf -- "$profile_dir"
-      ok "Removed client profile directory: $profile_dir"
-      same_dir_count=0
+      if safe_client_profile_directory "$profile_dir"; then rm -rf -- "$profile_dir"; ok "Removed client profile directory: $profile_dir"; fi
     else
-    for ((i=0; i<DISC_COUNT; i++)); do
-      [[ "$(dirname "${DISC_PRIMARY[$i]:-/}")" == "$install_dir" ]] && \
-        same_dir_count=$((same_dir_count + 1))
-    done
-    if safe_trusttunnel_directory "$install_dir" && (( same_dir_count <= 1 )); then
-      rm -rf -- "$install_dir"
-      ok "Removed installation directory: $install_dir"
-    else
-      local config_file credentials rules
-      credentials="$(instance_endpoint_credentials_file "$index")"
-      rules="$(instance_endpoint_rules_file "$index")"
-      for config_file in "${DISC_PRIMARY[$index]:-}" "${DISC_SECONDARY[$index]:-}" \
-        "$credentials" "$rules"; do
-        [[ -f "$config_file" ]] && rm -f -- "$config_file"
+      for ((i=0; i<DISC_COUNT; i++)); do
+        [[ "$(dirname "${DISC_PRIMARY[$i]:-/}")" == "$install_dir" ]] && same_dir_count=$((same_dir_count + 1))
       done
-      if (( same_dir_count > 1 )); then
-      warn "Multiple detected tunnels share $install_dir; the directory was preserved."
-        warn "Only the selected instance configuration files were removed."
+      if safe_trusttunnel_directory "$install_dir" && (( same_dir_count <= 1 )); then
+        rm -rf -- "$install_dir"
+        ok "Removed installation directory: $install_dir"
       else
-        warn "The install directory is outside safe removal paths and was preserved."
-        ok "Detected configuration files for this instance were removed."
+        credentials="$(instance_endpoint_credentials_file "$index")"
+        rules="$(instance_endpoint_rules_file "$index")"
+        for config_file in "${DISC_PRIMARY[$index]:-}" "${DISC_SECONDARY[$index]:-}" "$credentials" "$rules"; do
+          [[ -f "$config_file" ]] && rm -f -- "$config_file"
+        done
+        warn "The install directory was preserved; only selected configuration files were removed."
       fi
-    fi
     fi
   fi
   systemctl daemon-reload
@@ -2831,48 +2991,30 @@ update_discovered_instance() {
   binary="${DISC_BINARY[$index]:-}"
   [[ -x "$binary" ]] || { error "The TrustTunnel binary was not found."; pause; return 1; }
   target="$(dirname "$binary")"
-  if [[ "$role" == "endpoint" ]]; then
-    url="$ENDPOINT_INSTALL_URL" label="Endpoint"
-  else
-    url="$CLIENT_INSTALL_URL" label="Client"
-  fi
+  if [[ "$role" == "endpoint" ]]; then url="$ENDPOINT_INSTALL_URL" label="Endpoint"; else url="$CLIENT_INSTALL_URL" label="Client"; fi
   if [[ "$role" == "client" ]]; then
     for ((i=0; i<DISC_COUNT; i++)); do
       [[ "${DISC_ROLE[$i]:-}" == "client" ]] || continue
       [[ "${DISC_BINARY[$i]:-}" == "$binary" ]] || continue
       backup_discovered_instance "$i"
       item="${DISC_SERVICE[$i]:-}"
-      if [[ -n "$item" && -z "${seen_services[$item]:-}" ]]; then
-        services+=("$item")
-        seen_services[$item]=1
-      fi
+      if [[ -n "$item" && -z "${seen_services[$item]:-}" ]]; then services+=("$item"); seen_services[$item]=1; fi
     done
-    if (( ${#services[@]} > 1 )); then
-      warn "This client binary is shared by ${#services[@]} profiles. They will be restarted together."
-    fi
   else
     backup_discovered_instance "$index"
     [[ -n "$service" ]] && services+=("$service")
   fi
-
-  for item in "${services[@]}"; do
-    systemctl stop "$item" >/dev/null 2>&1 || true
-  done
+  for item in "${services[@]}"; do systemctl stop "$item" >/dev/null 2>&1 || true; done
   if download_and_run_installer "$url" "TrustTunnel $label" -o "$target"; then
     for item in "${services[@]}"; do
-      if ! systemctl start "$item"; then
-        error "Service failed to restart after the update: $item"
-        start_failed=1
-      fi
+      if ! systemctl start "$item"; then error "Service failed to restart after the update: $item"; start_failed=1; fi
     done
     ok "TrustTunnel $label was updated."
     (( ${#services[@]} > 0 )) || warn "No systemd service was detected. Restart this instance manually."
     (( start_failed == 0 )) || warn "Review the failed service logs from the installation menu."
   else
     error "Update failed."
-    for item in "${services[@]}"; do
-      systemctl start "$item" >/dev/null 2>&1 || true
-    done
+    for item in "${services[@]}"; do systemctl start "$item" >/dev/null 2>&1 || true; done
   fi
   pause
 }
@@ -2882,18 +3024,9 @@ enable_endpoint_metrics() {
   primary="${DISC_PRIMARY[$index]:-}"
   [[ -f "$primary" ]] || { error "Endpoint primary configuration was not found."; pause; return 1; }
   address="$(toml_get "$primary" "metrics" "address" 2>/dev/null || true)"
-  if [[ -n "$address" ]]; then
-    ok "Endpoint metrics are already configured at: $address"
-    pause
-    return 0
-  fi
+  if [[ -n "$address" ]]; then ok "Endpoint metrics are already configured at: $address"; pause; return 0; fi
   port="$(ask_port "Local endpoint metrics port" "1987")" || return 1
-  if [[ -n "$(port_listener "$port")" ]]; then
-    error "Port $port is already in use."
-    port_listener "$port"
-    pause
-    return 1
-  fi
+  if [[ -n "$(port_listener "$port")" ]]; then error "Port $port is already in use."; port_listener "$port"; pause; return 1; fi
   backup="$primary.before-metrics-$(timestamp)"
   cp -a -- "$primary" "$backup"
   {
@@ -2916,24 +3049,15 @@ disable_endpoint_metrics() {
   local index="$1" primary backup tmp
   primary="${DISC_PRIMARY[$index]:-}"
   [[ -f "$primary" ]] || { error "Endpoint primary configuration was not found."; pause; return 1; }
-  if ! toml_has_section "$primary" "metrics"; then
-    ok "Endpoint metrics are already disabled."
-    pause
-    return 0
-  fi
-
+  if ! toml_has_section "$primary" "metrics"; then ok "Endpoint metrics are already disabled."; pause; return 0; fi
   backup="$primary.before-metrics-disable-$(timestamp)"
   tmp="$(mktemp "$(dirname "$primary")/.vpn-without-metrics.XXXXXX")" || return 1
   cp -a -- "$primary" "$backup" || { rm -f -- "$tmp"; return 1; }
   if ! remove_toml_section "$primary" "metrics" "$tmp"; then
-    rm -f -- "$tmp"
-    error "Could not remove the [metrics] section."
-    pause
-    return 1
+    rm -f -- "$tmp"; error "Could not remove the [metrics] section."; pause; return 1
   fi
   install -m 0600 "$tmp" "$primary" || { rm -f -- "$tmp"; return 1; }
   rm -f -- "$tmp"
-
   if restart_discovered_instance "$index"; then
     ok "Endpoint metrics were disabled. The localhost metrics listener is no longer configured."
   else
@@ -2950,139 +3074,87 @@ toggle_endpoint_metrics() {
   local index="$1" primary
   primary="${DISC_PRIMARY[$index]:-}"
   [[ -f "$primary" ]] || { error "Endpoint primary configuration was not found."; pause; return 1; }
-  if toml_has_section "$primary" "metrics"; then
-    disable_endpoint_metrics "$index"
-  else
-    enable_endpoint_metrics "$index"
-  fi
+  if toml_has_section "$primary" "metrics"; then disable_endpoint_metrics "$index"; else enable_endpoint_metrics "$index"; fi
 }
 
 endpoint_restart_service_is_safe() {
   [[ "${1:-}" =~ ^[A-Za-z0-9_.@:-]+\.service$ ]]
 }
-
 endpoint_restart_slug() {
   local service="${1:-}" base
   endpoint_restart_service_is_safe "$service" || return 1
   base="${service%.service}"
   printf '%s' "$base" | sed 's/[^A-Za-z0-9_.@-]/-/g'
 }
-
 endpoint_restart_helper_unit() {
-  local slug
-  slug="$(endpoint_restart_slug "$1")" || return 1
+  local slug; slug="$(endpoint_restart_slug "$1")" || return 1
   printf 'trusttunnel-manager-restart-%s.service' "$slug"
 }
-
 endpoint_restart_timer_unit() {
-  local slug
-  slug="$(endpoint_restart_slug "$1")" || return 1
+  local slug; slug="$(endpoint_restart_slug "$1")" || return 1
   printf 'trusttunnel-manager-restart-%s.timer' "$slug"
 }
-
 endpoint_restart_interval_minutes() {
   local service="$1" timer path value
   timer="$(endpoint_restart_timer_unit "$service")" || return 1
   path="$SYSTEMD_UNIT_DIR/$timer"
   [[ -f "$path" ]] || { printf '0'; return 0; }
-  value="$(awk -F= '$1 ~ /^[[:space:]]*OnUnitActiveSec[[:space:]]*$/ {
-    gsub(/[[:space:]]/, "", $2); print $2; exit
-  }' "$path" 2>/dev/null || true)"
-  if [[ "$value" =~ ^([0-9]+)min$ ]]; then
-    printf '%s' "${BASH_REMATCH[1]}"
-  else
-    printf '0'
-  fi
+  value="$(awk -F= '$1 ~ /^[[:space:]]*OnUnitActiveSec[[:space:]]*$/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "$path" 2>/dev/null || true)"
+  if [[ "$value" =~ ^([0-9]+)min$ ]]; then printf '%s' "${BASH_REMATCH[1]}"; else printf '0'; fi
 }
-
 remove_endpoint_restart_schedule() {
   local service="$1" quiet="${2:-0}" helper timer helper_path timer_path existed=0
   endpoint_restart_service_is_safe "$service" || return 1
   helper="$(endpoint_restart_helper_unit "$service")" || return 1
   timer="$(endpoint_restart_timer_unit "$service")" || return 1
-  helper_path="$SYSTEMD_UNIT_DIR/$helper"
-  timer_path="$SYSTEMD_UNIT_DIR/$timer"
+  helper_path="$SYSTEMD_UNIT_DIR/$helper"; timer_path="$SYSTEMD_UNIT_DIR/$timer"
   [[ -f "$helper_path" || -f "$timer_path" ]] && existed=1
-
   systemctl disable --now "$timer" >/dev/null 2>&1 || true
   rm -f -- "$helper_path" "$timer_path"
   systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl reset-failed "$helper" "$timer" >/dev/null 2>&1 || true
   if [[ "$quiet" != "1" ]]; then
-    if (( existed == 1 )); then
-      ok "Automatic endpoint restart was disabled."
-    else
-      ok "Automatic endpoint restart is already disabled."
-    fi
+    if (( existed == 1 )); then ok "Automatic endpoint restart was disabled."; else ok "Automatic endpoint restart is already disabled."; fi
   fi
 }
-
 configure_endpoint_restart_schedule() {
   local index="$1" service current value helper timer helper_path timer_path systemctl_bin
   local backup_dir had_helper=0 had_timer=0 was_enabled=0 was_active=0
   service="${DISC_SERVICE[$index]:-}"
-  if [[ -z "$service" ]]; then
-    error "This endpoint is not attached to a detected systemd service."
-    pause
-    return 1
-  fi
-  if ! endpoint_restart_service_is_safe "$service"; then
-    error "The detected endpoint service name is not safe for an automatic restart unit: $service"
-    pause
-    return 1
-  fi
-
+  if [[ -z "$service" ]]; then error "This endpoint is not attached to a detected systemd service."; pause; return 1; fi
+  if ! endpoint_restart_service_is_safe "$service"; then error "The detected endpoint service name is not safe for an automatic restart unit: $service"; pause; return 1; fi
   current="$(endpoint_restart_interval_minutes "$service" 2>/dev/null || printf '0')"
   printf 'Current automatic restart interval: '
-  if [[ "$current" =~ ^[1-9][0-9]*$ ]]; then
-    printf '%s minute(s)\n' "$current"
-  else
-    printf 'disabled\n'
-    current="0"
-  fi
+  if [[ "$current" =~ ^[1-9][0-9]*$ ]]; then printf '%s minute(s)\n' "$current"; else printf 'disabled\n'; current="0"; fi
   printf 'Enter 0 to disable automatic restarts. Enter 1 or more for the interval in minutes.\n'
   while true; do
     read -r -p "Restart endpoint every how many minutes? [$current]: " value || return 1
     value="${value:-$current}"
-    if [[ "$value" =~ ^[0-9]+$ && ${#value} -le 9 ]]; then
-      value="$((10#$value))"
-      break
-    fi
+    if [[ "$value" =~ ^[0-9]+$ && ${#value} -le 9 ]]; then value="$((10#$value))"; break; fi
     warn "Enter 0 to disable, or a whole number of minutes (1 or more)."
   done
-
-  if (( value == 0 )); then
-    remove_endpoint_restart_schedule "$service"
-    pause
-    return 0
-  fi
-
+  if (( value == 0 )); then remove_endpoint_restart_schedule "$service"; pause; return 0; fi
   helper="$(endpoint_restart_helper_unit "$service")" || return 1
   timer="$(endpoint_restart_timer_unit "$service")" || return 1
-  helper_path="$SYSTEMD_UNIT_DIR/$helper"
-  timer_path="$SYSTEMD_UNIT_DIR/$timer"
+  helper_path="$SYSTEMD_UNIT_DIR/$helper"; timer_path="$SYSTEMD_UNIT_DIR/$timer"
   systemctl_bin="$(command -v systemctl)"
   [[ -x "$systemctl_bin" ]] || { error "systemctl executable was not found."; pause; return 1; }
-
   backup_dir="$(mktemp -d)" || return 1
   if [[ -f "$helper_path" ]]; then cp -a -- "$helper_path" "$backup_dir/helper"; had_helper=1; fi
   if [[ -f "$timer_path" ]]; then cp -a -- "$timer_path" "$backup_dir/timer"; had_timer=1; fi
   systemctl is-enabled --quiet "$timer" 2>/dev/null && was_enabled=1
   systemctl is-active --quiet "$timer" 2>/dev/null && was_active=1
-
   umask 077
-  command cat > "$helper_path" <<EOF
+  command cat > "$helper_path" <<EOF_UNIT
 [Unit]
 Description=Restart TrustTunnel Endpoint ($service)
 After=network-online.target
-
 [Service]
 Type=oneshot
 ExecStart=$systemctl_bin restart $service
-EOF
+EOF_UNIT
   chmod 0644 "$helper_path"
-
-  command cat > "$timer_path" <<EOF
+  command cat > "$timer_path" <<EOF_UNIT
 [Unit]
 Description=Periodic restart timer for TrustTunnel Endpoint ($service)
 
@@ -3094,9 +3166,8 @@ Unit=$helper
 
 [Install]
 WantedBy=timers.target
-EOF
+EOF_UNIT
   chmod 0644 "$timer_path"
-
   if systemctl daemon-reload && systemctl enable "$timer" >/dev/null 2>&1 && systemctl restart "$timer"; then
     rm -rf -- "$backup_dir"
     ok "Automatic endpoint restart is enabled every $value minute(s)."
@@ -3105,7 +3176,6 @@ EOF
     pause
     return 0
   fi
-
   error "Could not activate the automatic restart timer. Restoring the previous timer configuration."
   systemctl disable --now "$timer" >/dev/null 2>&1 || true
   if (( had_helper == 1 )); then cp -a -- "$backup_dir/helper" "$helper_path"; else rm -f -- "$helper_path"; fi
@@ -3133,8 +3203,7 @@ show_endpoint_connections() {
     metrics="$(curl -fsS --max-time 5 "http://$address/metrics" 2>/dev/null || true)"
     if [[ -n "$metrics" ]]; then
       printf '\nAggregate TrustTunnel metrics:\n'
-      grep -E '^(client_sessions|inbound_traffic_bytes|outbound_traffic_bytes|outbound_tcp_sockets|outbound_udp_sockets)(\{|[[:space:]])' \
-        <<< "$metrics" || warn "Expected connection metrics were not returned."
+      grep -E '^(client_sessions|inbound_traffic_bytes|outbound_traffic_bytes|outbound_tcp_sockets|outbound_udp_sockets)(\{|[[:space:]])' <<< "$metrics" || warn "Expected connection metrics were not returned."
     else
       warn "Metrics are configured at $address but did not respond."
     fi
@@ -3154,11 +3223,7 @@ show_endpoint_connections() {
 show_client_outbound_details() {
   local index="$1" primary address username profile
   primary="${DISC_PRIMARY[$index]:-}"
-  if ! toml_has_section "$primary" "listener.socks"; then
-    warn "This client uses TUN and has no SOCKS outbound settings."
-    pause
-    return 0
-  fi
+  if ! toml_has_section "$primary" "listener.socks"; then warn "This client uses TUN and has no SOCKS outbound settings."; pause; return 0; fi
   address="$(toml_get "$primary" "listener.socks" "address" 2>/dev/null || true)"
   username="$(toml_get "$primary" "listener.socks" "username" 2>/dev/null || true)"
   profile="$(basename "$(dirname "$primary")")"
@@ -3202,6 +3267,7 @@ manage_discovered_instance() {
       else
         printf ' 12) Automatic endpoint restart (disabled)\n'
       fi
+      printf ' 13) Manage route (Direct/SOCKS5)\n'
     else
       printf '  9) Show 3x-ui SOCKS outbound details\n'
     fi
@@ -3213,8 +3279,7 @@ manage_discovered_instance() {
         if [[ -n "${DISC_SERVICE[$index]:-}" ]]; then
           systemctl status "${DISC_SERVICE[$index]}" --no-pager -l || true
         else
-          printf 'State: %s\nPID: %s\n' \
-            "$(instance_service_state "$index")" "${DISC_PID[$index]:-not detected}"
+          printf 'State: %s\nPID: %s\n' "$(instance_service_state "$index")" "${DISC_PID[$index]:-not detected}"
         fi
         pause
         ;;
@@ -3225,32 +3290,19 @@ manage_discovered_instance() {
       7) update_discovered_instance "$index" ;;
       8) remove_discovered_instance "$index"; return 0 ;;
       9)
-        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
-          manage_endpoint_client_accounts "$index"
-        else
-          show_client_outbound_details "$index"
-        fi
+        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then manage_endpoint_client_accounts "$index"; else show_client_outbound_details "$index"; fi
         ;;
       10)
-        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
-          show_endpoint_connections "$index"
-        else
-          warn "Invalid option."
-        fi
+        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then show_endpoint_connections "$index"; else warn "Invalid option."; fi
         ;;
       11)
-        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
-          toggle_endpoint_metrics "$index"
-        else
-          warn "Invalid option."
-        fi
+        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then toggle_endpoint_metrics "$index"; else warn "Invalid option."; fi
         ;;
       12)
-        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
-          configure_endpoint_restart_schedule "$index"
-        else
-          warn "Invalid option."
-        fi
+        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then configure_endpoint_restart_schedule "$index"; else warn "Invalid option."; fi
+        ;;
+      13)
+        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then manage_endpoint_route "$index"; else warn "Invalid option."; fi
         ;;
       0) return 0 ;;
       *) warn "Invalid option."; sleep 1 ;;
@@ -3296,7 +3348,6 @@ foreign_endpoint_menu() {
     fi
     printf '  0) Back\n\n'
     read -r -p "Select: " choice || return 0
-
     if (( endpoint_count == 0 )); then
       case "$choice" in
         1) configure_endpoint ;;
@@ -3305,20 +3356,10 @@ foreign_endpoint_menu() {
       esac
       continue
     fi
-
     case "$choice" in
-      1)
-        index="$(select_role_instance_index endpoint "Foreign Endpoint")" || { pause; continue; }
-        add_endpoint_client_account "$index"
-        ;;
-      2)
-        index="$(select_role_instance_index endpoint "Foreign Endpoint")" || { pause; continue; }
-        manage_endpoint_client_accounts "$index"
-        ;;
-      3)
-        index="$(select_role_instance_index endpoint "Foreign Endpoint")" || { pause; continue; }
-        manage_discovered_instance "$index"
-        ;;
+      1) index="$(select_role_instance_index endpoint "Foreign Endpoint")" || { pause; continue; }; add_endpoint_client_account "$index" ;;
+      2) index="$(select_role_instance_index endpoint "Foreign Endpoint")" || { pause; continue; }; manage_endpoint_client_accounts "$index" ;;
+      3) index="$(select_role_instance_index endpoint "Foreign Endpoint")" || { pause; continue; }; manage_discovered_instance "$index" ;;
       4) configure_endpoint ;;
       0) return 0 ;;
       *) warn "Invalid option."; sleep 1 ;;
@@ -3336,19 +3377,13 @@ iran_client_connections_menu() {
     print_role_installations client
     printf '\nEach connection has its own configuration, systemd service, and local SOCKS port.\n\n'
     printf '  1) Add New Foreign Server Connection\n'
-    if (( client_count > 0 )); then
-      printf '  2) Manage Existing Connection\n'
-    fi
+    if (( client_count > 0 )); then printf '  2) Manage Existing Connection\n'; fi
     printf '  0) Back\n\n'
     read -r -p "Select: " choice || return 0
     case "$choice" in
       1) configure_client_profile ;;
       2)
-        if (( client_count == 0 )); then
-          warn "Invalid option."
-          sleep 1
-          continue
-        fi
+        if (( client_count == 0 )); then warn "Invalid option."; sleep 1; continue; fi
         index="$(select_role_instance_index client "Iran Client connection")" || { pause; continue; }
         manage_discovered_instance "$index"
         ;;
@@ -3368,8 +3403,7 @@ list_manager_backups() {
   printf 'Recovery: failed profile reconfiguration is rolled back automatically.\n'
   printf 'Manual restore is not automated; keep the matching backup directory for recovery.\n\n'
   printf 'Backup directory: %s\n\n' "$BACKUP_DIR"
-  find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '  %TY-%Tm-%Td %TH:%TM  %f\n' \
-    2>/dev/null | sort -r || true
+  find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '  %TY-%Tm-%Td %TH:%TM  %f\n' 2>/dev/null | sort -r || true
   pause
 }
 
@@ -3378,89 +3412,52 @@ show_status() {
   banner
   printf '%sService Status%s\n\n' "$BOLD" "$NC"
   if systemctl cat "$ENDPOINT_SERVICE" >/dev/null 2>&1; then
-    printf 'Endpoint: %s / %s\n' \
-      "$(systemctl is-active "$ENDPOINT_SERVICE" 2>/dev/null || true)" \
-      "$(systemctl is-enabled "$ENDPOINT_SERVICE" 2>/dev/null || true)"
+    printf 'Endpoint: %s / %s\n' "$(systemctl is-active "$ENDPOINT_SERVICE" 2>/dev/null || true)" "$(systemctl is-enabled "$ENDPOINT_SERVICE" 2>/dev/null || true)"
     "$ENDPOINT_DIR/trusttunnel_endpoint" --version 2>/dev/null | sed 's/^/Version: /' || true
     endpoint_listen="$(toml_get "$ENDPOINT_DIR/vpn.toml" "" "listen_address" 2>/dev/null || true)"
     endpoint_port="${endpoint_listen##*:}"
     valid_port "$endpoint_port" || endpoint_port="${ENDPOINT_PORT:-443}"
     valid_port "$endpoint_port" || endpoint_port="443"
     endpoint_port_users "$endpoint_port"
+    show_endpoint_route_status_file "$ENDPOINT_DIR/vpn.toml" || true
     printf '\n'
   fi
   if systemctl cat "$CLIENT_SERVICE" >/dev/null 2>&1; then
-    printf 'Client: %s / %s\n' \
-      "$(systemctl is-active "$CLIENT_SERVICE" 2>/dev/null || true)" \
-      "$(systemctl is-enabled "$CLIENT_SERVICE" 2>/dev/null || true)"
+    printf 'Client: %s / %s\n' "$(systemctl is-active "$CLIENT_SERVICE" 2>/dev/null || true)" "$(systemctl is-enabled "$CLIENT_SERVICE" 2>/dev/null || true)"
     "$CLIENT_DIR/trusttunnel_client" --version 2>/dev/null || true
     if [[ -n "$SOCKS_PORT" ]]; then port_listener "$SOCKS_PORT"; fi
     printf '\n'
   fi
-  if ! systemctl cat "$ENDPOINT_SERVICE" >/dev/null 2>&1 && \
-     ! systemctl cat "$CLIENT_SERVICE" >/dev/null 2>&1; then
-    warn "No managed TrustTunnel services were found."
-  fi
+  if ! systemctl cat "$ENDPOINT_SERVICE" >/dev/null 2>&1 && ! systemctl cat "$CLIENT_SERVICE" >/dev/null 2>&1; then warn "No managed TrustTunnel services were found."; fi
   pause
 }
 
 show_logs() {
   local service choice
-  if [[ "$ROLE" == "foreign" ]]; then
-    service="$ENDPOINT_SERVICE"
-  elif [[ "$ROLE" == "iran" ]]; then
-    service="$CLIENT_SERVICE"
-  else
-    printf '1) Endpoint\n2) Client\n'
-    read -r -p "Select: " choice || return 1
-    [[ "$choice" == "1" ]] && service="$ENDPOINT_SERVICE" || service="$CLIENT_SERVICE"
+  if [[ "$ROLE" == "foreign" ]]; then service="$ENDPOINT_SERVICE"; elif [[ "$ROLE" == "iran" ]]; then service="$CLIENT_SERVICE"; else
+    printf '1) Endpoint\n2) Client\n'; read -r -p "Select: " choice || return 1; [[ "$choice" == "1" ]] && service="$ENDPOINT_SERVICE" || service="$CLIENT_SERVICE"
   fi
   banner
   printf '1) Last 80 lines\n2) Follow live logs (exit with Ctrl+C)\n'
   read -r -p "Select [1]: " choice || return 1
   choice="${choice:-1}"
-  if [[ "$choice" == "2" ]]; then
-    journalctl -u "$service" -f --no-pager || true
-  else
-    journalctl -u "$service" -n 80 --no-pager || true
-    pause
-  fi
+  if [[ "$choice" == "2" ]]; then journalctl -u "$service" -f --no-pager || true; else journalctl -u "$service" -n 80 --no-pager || true; pause; fi
 }
 
 restart_role_service() {
   local service
   [[ "$ROLE" == "foreign" ]] && service="$ENDPOINT_SERVICE" || service="$CLIENT_SERVICE"
-  if systemctl restart "$service"; then
-    ok "The service was restarted."
-    systemctl status "$service" --no-pager -l | head -n 15
-  else
-    error "Service restart failed."
-    journalctl -u "$service" -n 30 --no-pager || true
-  fi
+  if systemctl restart "$service"; then ok "The service was restarted."; systemctl status "$service" --no-pager -l | head -n 15; else error "Service restart failed."; journalctl -u "$service" -n 30 --no-pager || true; fi
   pause
 }
 
 update_core() {
   local service url label
-  if [[ "$ROLE" == "foreign" ]]; then
-    service="$ENDPOINT_SERVICE" url="$ENDPOINT_INSTALL_URL" label="Endpoint"
-    backup_endpoint
-  elif [[ "$ROLE" == "iran" ]]; then
-    service="$CLIENT_SERVICE" url="$CLIENT_INSTALL_URL" label="Client"
-    backup_client
-  else
-    error "The server role is not configured."
-    pause
-    return 1
-  fi
+  if [[ "$ROLE" == "foreign" ]]; then service="$ENDPOINT_SERVICE" url="$ENDPOINT_INSTALL_URL" label="Endpoint"; backup_endpoint
+  elif [[ "$ROLE" == "iran" ]]; then service="$CLIENT_SERVICE" url="$CLIENT_INSTALL_URL" label="Client"; backup_client
+  else error "The server role is not configured."; pause; return 1; fi
   systemctl stop "$service" >/dev/null 2>&1 || true
-  if download_and_run_installer "$url" "TrustTunnel $label"; then
-    systemctl start "$service" || true
-    ok "TrustTunnel core was updated."
-  else
-    error "The update failed."
-    systemctl start "$service" >/dev/null 2>&1 || true
-  fi
+  if download_and_run_installer "$url" "TrustTunnel $label"; then systemctl start "$service" || true; ok "TrustTunnel core was updated."; else error "The update failed."; systemctl start "$service" >/dev/null 2>&1 || true; fi
   pause
 }
 
@@ -3472,32 +3469,20 @@ uninstall_role() {
   warn "Certificates and keys stored outside /opt will not be removed."
   confirm "Create a configuration backup in $BACKUP_DIR before removal?" "y" && backup=1 || backup=0
   confirm "Are you sure you want to remove it?" "n" || return 0
-
   if [[ "$ROLE" == "foreign" ]]; then
     (( backup == 1 )) && backup_endpoint
     remove_endpoint_restart_schedule "$ENDPOINT_SERVICE" 1 || true
     systemctl disable --now "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
-    rm -f "$ENDPOINT_UNIT"
-    rm -rf "$ENDPOINT_DIR"
-    if [[ -f "$ENDPOINT_EXPORT" ]] && confirm "Also remove the current secret export file $ENDPOINT_EXPORT?" "y"; then
-      rm -f "$ENDPOINT_EXPORT"
-    fi
-    if [[ -f "$ROOT_ENDPOINT_EXPORT" ]] && confirm "Also remove the /root convenience copy $ROOT_ENDPOINT_EXPORT?" "y"; then
-      rm -f "$ROOT_ENDPOINT_EXPORT"
-    fi
+    rm -f "$ENDPOINT_UNIT"; rm -rf "$ENDPOINT_DIR"
+    if [[ -f "$ENDPOINT_EXPORT" ]] && confirm "Also remove the current secret export file $ENDPOINT_EXPORT?" "y"; then rm -f "$ENDPOINT_EXPORT"; fi
+    if [[ -f "$ROOT_ENDPOINT_EXPORT" ]] && confirm "Also remove the /root convenience copy $ROOT_ENDPOINT_EXPORT?" "y"; then rm -f "$ROOT_ENDPOINT_EXPORT"; fi
   elif [[ "$ROLE" == "iran" ]]; then
     (( backup == 1 )) && backup_client
     systemctl disable --now "$CLIENT_SERVICE" >/dev/null 2>&1 || true
-    rm -f "$CLIENT_UNIT"
-    rm -rf "$CLIENT_DIR"
-  else
-    error "The server role is not configured."
-    pause
-    return 1
-  fi
+    rm -f "$CLIENT_UNIT"; rm -rf "$CLIENT_DIR"
+  else error "The server role is not configured."; pause; return 1; fi
   systemctl daemon-reload
-  rm -f "$STATE_FILE"
-  ROLE=""
+  rm -f "$STATE_FILE"; ROLE=""
   ok "Removal completed. If a backup was selected, the configuration can be recovered."
   pause
 }
@@ -3534,8 +3519,7 @@ main_menu() {
     endpoint_count="$(role_installation_count endpoint)"
     client_count="$(role_installation_count client)"
     banner
-    printf 'Foreign Endpoints: %s%s%s | Iran connections: %s%s%s\n\n' \
-      "$GREEN" "$endpoint_count" "$NC" "$GREEN" "$client_count" "$NC"
+    printf 'Foreign Endpoints: %s%s%s | Iran connections: %s%s%s\n\n' "$GREEN" "$endpoint_count" "$NC" "$GREEN" "$client_count" "$NC"
     printf '  1) Foreign Endpoint\n'
     printf '  2) Iran Client Connections\n'
     printf '  3) View All Detected Installations\n'
@@ -3556,14 +3540,14 @@ main_menu() {
 }
 
 usage() {
-  command cat <<EOF
+  command cat <<EOF_USAGE
 $APP_NAME v$APP_VERSION
 
 Usage:
   trusttunnel-manager            Interactive menu
   trusttunnel-manager --status   Discover and list installations
   trusttunnel-manager --help     Show this help
-EOF
+EOF_USAGE
 }
 
 main() {
@@ -3573,7 +3557,6 @@ main() {
   ensure_state_dirs
   install_manager_command || warn "The manager command could not be installed/updated; continuing with the current session."
   load_state
-
   case "${1:-}" in
     --help|-h) usage ;;
     --status)

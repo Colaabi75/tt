@@ -7,7 +7,7 @@
 set -uo pipefail
 IFS=$'\n\t'
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.4.8"
+APP_VERSION="0.4.9"
 INSTALL_PATH="${TT_MANAGER_INSTALL_PATH:-/usr/local/bin/trusttunnel-manager}"
 MANAGER_INSTALL_URL="${TT_MANAGER_INSTALL_URL:-https://raw.githubusercontent.com/Colaabi75/tt/main/tt.sh}"
 STATE_DIR="/etc/trusttunnel-manager"
@@ -1714,7 +1714,13 @@ strip_endpoint_forward_protocol_sections() {
     }
     /^[[:space:]]*\[[^][]+\][[:space:]]*$/ {
       section=section_name($0)
-      skip=(section == "forward_protocol" || section == "forward_protocol.socks5")
+      # Remove every forward_protocol representation before writing the new
+      # route. Older TrustTunnel setup_wizard versions may generate
+      # [forward_protocol.direct], while newer examples commonly use
+      # [forward_protocol] with direct = {}. Leaving the old direct table in
+      # place together with [forward_protocol.socks5] makes the endpoint enum
+      # contain two variants and TrustTunnel refuses to parse vpn.toml.
+      skip=(section == "forward_protocol" || index(section, "forward_protocol.") == 1)
       if (!skip) print
       next
     }

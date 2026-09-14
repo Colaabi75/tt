@@ -7,7 +7,7 @@
 set -uo pipefail
 IFS=$'\n\t'
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.4.9"
+APP_VERSION="0.5.0"
 INSTALL_PATH="${TT_MANAGER_INSTALL_PATH:-/usr/local/bin/trusttunnel-manager}"
 MANAGER_INSTALL_URL="${TT_MANAGER_INSTALL_URL:-https://raw.githubusercontent.com/Colaabi75/tt/main/tt.sh}"
 STATE_DIR="/etc/trusttunnel-manager"
@@ -29,6 +29,7 @@ CLIENT_SERVICE="trusttunnel-client.service"
 CLIENT_UNIT="$SYSTEMD_UNIT_DIR/$CLIENT_SERVICE"
 CLIENT_INSTALL_URL="https://raw.githubusercontent.com/TrustTunnel/TrustTunnelClient/refs/heads/master/scripts/install.sh"
 CLIENT_PROFILES_DIR="$STATE_DIR/clients"
+SOURCE_ROUTE_HELPER="/usr/local/libexec/trusttunnel-source-route"
 
 ROLE=""
 DOMAIN=""
@@ -110,7 +111,7 @@ require_platform() {
 
 install_dependencies() {
   local missing=() cmd
-  for cmd in curl openssl awk sed grep find ss timeout getent readlink ps; do
+  for cmd in curl openssl awk sed grep find ss timeout getent readlink ps ip useradd sha256sum cksum; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   [[ ${#missing[@]} -eq 0 ]] && return 0
@@ -118,7 +119,7 @@ install_dependencies() {
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y || return 1
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      curl openssl ca-certificates coreutils findutils iproute2 procps gawk grep sed || return 1
+      curl openssl ca-certificates coreutils findutils iproute2 procps gawk grep sed passwd || return 1
   else
     error "Required tools are missing. Automatic dependency installation currently supports Debian/Ubuntu only."
     error "Missing tools: ${missing[*]}"
@@ -2031,6 +2032,312 @@ manage_endpoint_route() {
 # --- end endpoint route management ---
 
 # -----------------------------------------------------------------------------
+# Iran-client source-IP policy routing
+# -----------------------------------------------------------------------------
+source_route_state_file() {
+  local profile="$1"
+  printf '%s/source-route.env' "$CLIENT_PROFILES_DIR/$profile"
+}
+
+profile_source_user_name() {
+  local profile="$1" hash
+  hash="$(printf '%s' "$profile" | sha256sum | awk '{print substr($1,1,12)}')"
+  printf 'ttsrc_%s' "$hash"
+}
+
+ensure_source_route_helper() {
+  local dir
+  dir="$(dirname "$SOURCE_ROUTE_HELPER")"
+  install -d -m 0755 "$dir" || return 1
+  umask 077
+  command cat > "$SOURCE_ROUTE_HELPER" <<'EOF_SOURCE_HELPER'
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+fail() { printf '[source-route] ERROR: %s\n' "$*" >&2; exit 1; }
+[[ $# -eq 2 ]] || fail "usage: $0 <apply|remove> <state-file>"
+action="$1"
+state_file="$2"
+[[ "$action" == "apply" || "$action" == "remove" ]] || fail "invalid action"
+[[ -r "$state_file" ]] || fail "state file is not readable: $state_file"
+
+SOURCE_MODE="" SOURCE_IP="" SOURCE_IFACE="" SOURCE_GATEWAY=""
+SOURCE_TABLE="" SOURCE_PRIORITY="" SOURCE_UID=""
+# shellcheck disable=SC1090
+source "$state_file"
+[[ "$SOURCE_MODE" == "specific" ]] || exit 0
+[[ "$SOURCE_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "invalid SOURCE_IP"
+[[ "$SOURCE_IFACE" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] || fail "invalid SOURCE_IFACE"
+[[ -z "$SOURCE_GATEWAY" || "$SOURCE_GATEWAY" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "invalid SOURCE_GATEWAY"
+[[ "$SOURCE_TABLE" =~ ^[1-9][0-9]{0,9}$ ]] || fail "invalid SOURCE_TABLE"
+[[ "$SOURCE_PRIORITY" =~ ^[1-9][0-9]{0,9}$ ]] || fail "invalid SOURCE_PRIORITY"
+[[ "$SOURCE_UID" =~ ^[1-9][0-9]*$ ]] || fail "invalid SOURCE_UID"
+
+IP_BIN="$(command -v ip)"
+[[ -n "$IP_BIN" ]] || fail "ip command not found"
+
+remove_policy() {
+  while "$IP_BIN" -4 rule del priority "$SOURCE_PRIORITY" uidrange "$SOURCE_UID-$SOURCE_UID" lookup "$SOURCE_TABLE" 2>/dev/null; do :; done
+  if [[ -n "$SOURCE_GATEWAY" ]]; then
+    while "$IP_BIN" -4 route del table "$SOURCE_TABLE" default via "$SOURCE_GATEWAY" dev "$SOURCE_IFACE" src "$SOURCE_IP" 2>/dev/null; do :; done
+    while "$IP_BIN" -4 route del table "$SOURCE_TABLE" default via "$SOURCE_GATEWAY" dev "$SOURCE_IFACE" src "$SOURCE_IP" onlink 2>/dev/null; do :; done
+  else
+    while "$IP_BIN" -4 route del table "$SOURCE_TABLE" default dev "$SOURCE_IFACE" src "$SOURCE_IP" 2>/dev/null; do :; done
+  fi
+}
+
+if [[ "$action" == "remove" ]]; then
+  remove_policy
+  exit 0
+fi
+
+"$IP_BIN" -4 addr show dev "$SOURCE_IFACE" | grep -Fq " $SOURCE_IP/" || fail "source IP is no longer assigned to $SOURCE_IFACE"
+remove_policy
+if "$IP_BIN" -4 rule show 2>/dev/null | grep -Eq "^${SOURCE_PRIORITY}:"; then
+  fail "routing-rule priority $SOURCE_PRIORITY is already used by another rule"
+fi
+if "$IP_BIN" -4 route show table "$SOURCE_TABLE" 2>/dev/null | grep -q .; then
+  fail "routing table $SOURCE_TABLE contains routes not owned by this TrustTunnel profile"
+fi
+if [[ -n "$SOURCE_GATEWAY" ]]; then
+  if ! "$IP_BIN" -4 route add table "$SOURCE_TABLE" default via "$SOURCE_GATEWAY" dev "$SOURCE_IFACE" src "$SOURCE_IP"; then
+    "$IP_BIN" -4 route add table "$SOURCE_TABLE" default via "$SOURCE_GATEWAY" dev "$SOURCE_IFACE" src "$SOURCE_IP" onlink || fail "could not install source-selected default route"
+  fi
+else
+  "$IP_BIN" -4 route add table "$SOURCE_TABLE" default dev "$SOURCE_IFACE" src "$SOURCE_IP" || fail "could not install source-selected default route"
+fi
+if ! "$IP_BIN" -4 rule add priority "$SOURCE_PRIORITY" uidrange "$SOURCE_UID-$SOURCE_UID" lookup "$SOURCE_TABLE"; then
+  remove_policy
+  fail "could not install UID-based policy rule"
+fi
+probe="$("$IP_BIN" -4 route get 1.1.1.1 uid "$SOURCE_UID" 2>/dev/null | head -n1 || true)"
+if [[ -z "$probe" || "$probe" != *" dev $SOURCE_IFACE "* || "$probe" != *" src $SOURCE_IP"* ]]; then
+  remove_policy
+  fail "policy verification failed; expected dev $SOURCE_IFACE src $SOURCE_IP, got: ${probe:-no route}"
+fi
+EOF_SOURCE_HELPER
+  chmod 0755 "$SOURCE_ROUTE_HELPER"
+}
+
+local_global_ipv4_records() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/@.*/,"",$2); print $2, $4}' | sort -u
+}
+
+source_ip_record() {
+  local wanted="$1" iface cidr
+  while IFS=' ' read -r iface cidr; do
+    [[ -n "$iface" && -n "$cidr" ]] || continue
+    if [[ "${cidr%/*}" == "$wanted" ]]; then
+      printf '%s %s\n' "$iface" "$cidr"
+      return 0
+    fi
+  done < <(local_global_ipv4_records)
+  return 1
+}
+
+choose_client_source_ip() {
+  local records count=0 choice iface cidr ipaddr
+  local -a ifaces=() cidrs=() ips=()
+  records="$(local_global_ipv4_records)"
+  printf '\nTrustTunnel Client source IPv4:\n' >&2
+  printf '  1) Automatic (Linux default routing)\n' >&2
+  while IFS=' ' read -r iface cidr; do
+    [[ -n "$iface" && -n "$cidr" ]] || continue
+    ipaddr="${cidr%/*}"
+    ifaces+=("$iface"); cidrs+=("$cidr"); ips+=("$ipaddr")
+    count=$((count + 1))
+    printf '  %d) %s  [%s]\n' "$((count + 1))" "$ipaddr" "$iface" >&2
+  done <<< "$records"
+  if (( count == 0 )); then
+    warn "No global IPv4 addresses were detected; using automatic routing."
+    printf 'auto'
+    return 0
+  fi
+  while true; do
+    read -r -p "Select source IP [1]: " choice || return 1
+    choice="${choice:-1}"
+    if [[ "$choice" == "1" ]]; then printf 'auto'; return 0; fi
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 2 && choice <= count + 1 )); then
+      printf '%s' "${ips[$((choice-2))]}"
+      return 0
+    fi
+    warn "Invalid option."
+  done
+}
+
+source_route_id_in_use() {
+  local table="$1" priority="$2" excluded_profile="${3:-}" file t p profile
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    profile="$(basename "$(dirname "$file")")"
+    [[ "$profile" == "$excluded_profile" ]] && continue
+    t="" p=""
+    SOURCE_TABLE="" SOURCE_PRIORITY=""
+    # shellcheck disable=SC1090
+    source "$file" 2>/dev/null || true
+    t="${SOURCE_TABLE:-}"; p="${SOURCE_PRIORITY:-}"
+    [[ "$t" == "$table" || "$p" == "$priority" ]] && return 0
+  done < <(find "$CLIENT_PROFILES_DIR" -mindepth 2 -maxdepth 2 -type f -name source-route.env 2>/dev/null || true)
+  ip -4 rule show 2>/dev/null | grep -Eq "^${priority}:|lookup ${table}([[:space:]]|$)" && return 0
+  ip -4 route show table "$table" 2>/dev/null | grep -q . && return 0
+  return 1
+}
+
+allocate_source_route_ids() {
+  local profile="$1" seed offset table priority tries=0
+  seed="$(printf '%s' "$profile" | cksum | awk '{print $1}')"
+  offset=$((seed % 8000))
+  while (( tries < 8000 )); do
+    table=$((20000 + (offset + tries) % 8000))
+    priority=$((12000 + (offset + tries) % 8000))
+    if ! source_route_id_in_use "$table" "$priority" "$profile"; then
+      printf '%s %s\n' "$table" "$priority"
+      return 0
+    fi
+    tries=$((tries + 1))
+  done
+  return 1
+}
+
+ensure_profile_source_user() {
+  local profile="$1" user uid shell
+  user="$(profile_source_user_name "$profile")"
+  shell="$(command -v nologin 2>/dev/null || true)"
+  [[ -n "$shell" ]] || shell="/bin/false"
+  if ! getent passwd "$user" >/dev/null 2>&1; then
+    useradd --system --no-create-home --home-dir /nonexistent --shell "$shell" "$user" >/dev/null 2>&1 || {
+      error "Could not create the dedicated TrustTunnel source-routing user $user."
+      return 1
+    }
+  fi
+  uid="$(id -u "$user" 2>/dev/null || true)"
+  [[ "$uid" =~ ^[1-9][0-9]*$ ]] || { error "Could not determine UID for $user."; return 1; }
+  printf '%s %s\n' "$user" "$uid"
+}
+
+detect_source_route_path() {
+  local source_ip="$1" route assigned_iface route_iface="" gateway="" record fallback
+  record="$(source_ip_record "$source_ip" 2>/dev/null || true)"
+  [[ -n "$record" ]] || { error "IPv4 $source_ip is not currently assigned to this server."; return 1; }
+  assigned_iface="${record%% *}"
+  route="$(ip -4 route get 1.1.1.1 from "$source_ip" 2>/dev/null | head -n1 || true)"
+  if [[ "$route" =~ [[:space:]]dev[[:space:]]([^[:space:]]+) ]]; then route_iface="${BASH_REMATCH[1]}"; fi
+  if [[ "$route_iface" == "$assigned_iface" && "$route" =~ [[:space:]]via[[:space:]]([0-9.]+) ]]; then
+    gateway="${BASH_REMATCH[1]}"
+  elif [[ "$route_iface" != "$assigned_iface" ]]; then
+    fallback="$(ip -4 route show default dev "$assigned_iface" 2>/dev/null | head -n1 || true)"
+    if [[ "$fallback" =~ [[:space:]]via[[:space:]]([0-9.]+) ]]; then
+      gateway="${BASH_REMATCH[1]}"
+    elif [[ -z "$fallback" ]]; then
+      error "IPv4 $source_ip belongs to $assigned_iface, but Linux currently routes Internet traffic through ${route_iface:-another interface}."
+      error "No default route for $assigned_iface could be determined safely. Configure a valid gateway/route first, then retry."
+      return 1
+    fi
+  elif [[ -z "$route" ]]; then
+    error "Linux could not find an IPv4 Internet route from $source_ip."
+    return 1
+  fi
+  printf '%s|%s\n' "$assigned_iface" "$gateway"
+}
+
+write_source_route_state() {
+  local profile="$1" mode="$2" source_ip="${3:-}" state profile_dir ids user_info path iface gateway user uid table priority
+  profile_dir="$CLIENT_PROFILES_DIR/$profile"
+  state="$(source_route_state_file "$profile")"
+  install -d -m 0700 "$profile_dir"
+  if [[ "$mode" == "auto" ]]; then
+    command cat > "$state" <<EOF_STATE
+SOURCE_MODE=auto
+EOF_STATE
+    chmod 0600 "$state"
+    return 0
+  fi
+  path="$(detect_source_route_path "$source_ip")" || return 1
+  IFS='|' read -r iface gateway <<< "$path"
+  user_info="$(ensure_profile_source_user "$profile")" || return 1
+  IFS=' ' read -r user uid <<< "$user_info"
+  if [[ -f "$state" ]]; then
+    SOURCE_TABLE="" SOURCE_PRIORITY=""
+    # shellcheck disable=SC1090
+    source "$state" 2>/dev/null || true
+    table="${SOURCE_TABLE:-}"; priority="${SOURCE_PRIORITY:-}"
+  else
+    table=""; priority=""
+  fi
+  if [[ ! "$table" =~ ^[1-9][0-9]*$ || ! "$priority" =~ ^[1-9][0-9]*$ ]]; then
+    ids="$(allocate_source_route_ids "$profile")" || { error "Could not allocate an isolated policy-routing table for $profile."; return 1; }
+    IFS=' ' read -r table priority <<< "$ids"
+  fi
+  umask 077
+  command cat > "$state" <<EOF_STATE
+SOURCE_MODE=specific
+SOURCE_IP=$source_ip
+SOURCE_IFACE=$iface
+SOURCE_GATEWAY=$gateway
+SOURCE_TABLE=$table
+SOURCE_PRIORITY=$priority
+SOURCE_UID=$uid
+SOURCE_USER=$user
+EOF_STATE
+  chmod 0600 "$state"
+}
+
+load_source_route_state() {
+  local profile="$1" state
+  state="$(source_route_state_file "$profile")"
+  SOURCE_MODE="auto" SOURCE_IP="" SOURCE_IFACE="" SOURCE_GATEWAY=""
+  SOURCE_TABLE="" SOURCE_PRIORITY="" SOURCE_UID="" SOURCE_USER=""
+  [[ -r "$state" ]] || return 0
+  # shellcheck disable=SC1090
+  source "$state" 2>/dev/null || return 1
+}
+
+set_profile_runtime_permissions() {
+  local profile="$1" mode="$2" profile_dir="$CLIENT_PROFILES_DIR/$profile" user="${3:-}"
+  [[ -d "$profile_dir" ]] || return 1
+  if [[ "$mode" == "specific" ]]; then
+    [[ -n "$user" ]] || return 1
+    chown root:"$user" "$profile_dir" || return 1
+    chmod 0750 "$profile_dir" || return 1
+    [[ -f "$profile_dir/client.toml" ]] && { chown root:"$user" "$profile_dir/client.toml" || return 1; chmod 0640 "$profile_dir/client.toml" || return 1; }
+  else
+    chown root:root "$profile_dir" || return 1
+    chmod 0700 "$profile_dir" || return 1
+    [[ -f "$profile_dir/client.toml" ]] && { chown root:root "$profile_dir/client.toml" || return 1; chmod 0600 "$profile_dir/client.toml" || return 1; }
+  fi
+}
+
+remove_profile_source_policy() {
+  local profile="$1" state
+  state="$(source_route_state_file "$profile")"
+  if [[ -x "$SOURCE_ROUTE_HELPER" && -r "$state" ]]; then
+    "$SOURCE_ROUTE_HELPER" remove "$state" >/dev/null 2>&1 || true
+  fi
+}
+
+cleanup_profile_source_assets() {
+  local profile="$1" delete_user="${2:-0}" user=""
+  load_source_route_state "$profile" 2>/dev/null || true
+  user="${SOURCE_USER:-}"
+  [[ -n "$user" ]] || user="$(profile_source_user_name "$profile")"
+  remove_profile_source_policy "$profile"
+  if [[ "$delete_user" == "1" && -n "$user" && "$user" == ttsrc_* ]]; then
+    userdel "$user" >/dev/null 2>&1 || true
+  fi
+}
+
+source_route_summary() {
+  local profile="$1"
+  load_source_route_state "$profile" || true
+  if [[ "${SOURCE_MODE:-auto}" == "specific" ]]; then
+    printf 'Specific: %s via %s (table %s, uid %s)' "${SOURCE_IP:-unknown}" "${SOURCE_IFACE:-unknown}" "${SOURCE_TABLE:-?}" "${SOURCE_UID:-?}"
+  else
+    printf 'Automatic (Linux default routing)'
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # Iran-client listener/profile management
 # -----------------------------------------------------------------------------
 socks_config_is_loopback_only() {
@@ -2269,6 +2576,11 @@ rollback_client_profile() {
   local unit="$SYSTEMD_UNIT_DIR/$service" backup_unit
   warn "Client profile setup failed. Restoring the previous state."
   systemctl disable --now "$service" >/dev/null 2>&1 || true
+  if [[ "$had_profile" != "1" ]]; then
+    cleanup_profile_source_assets "$profile" 1
+  else
+    remove_profile_source_policy "$profile"
+  fi
   if safe_client_profile_directory "$profile_dir" && [[ -d "$profile_dir" ]]; then
     find "$profile_dir" -depth -delete 2>/dev/null || true
   fi
@@ -2277,6 +2589,14 @@ rollback_client_profile() {
     [[ -d "$backup_path/profile" ]] && cp -a -- "$backup_path/profile" "$profile_dir"
     backup_unit="$backup_path/$(basename "$unit")"
     [[ -f "$backup_unit" ]] && cp -a -- "$backup_unit" "$unit"
+    load_source_route_state "$profile" 2>/dev/null || true
+    if [[ "${SOURCE_MODE:-auto}" == "specific" ]]; then
+      if ! set_profile_runtime_permissions "$profile" specific "${SOURCE_USER:-}" >/dev/null 2>&1; then
+        error "The previous profile was restored, but its source-routing file permissions could not be restored."
+      fi
+    else
+      set_profile_runtime_permissions "$profile" auto >/dev/null 2>&1 || true
+    fi
     systemctl daemon-reload
     [[ -f "$unit" ]] && systemctl enable "$service" >/dev/null 2>&1 || true
     if [[ "$was_active" == "1" ]]; then
@@ -2290,11 +2610,49 @@ rollback_client_profile() {
 }
 
 write_profile_client_unit() {
-  local profile="$1" config="$2" service unit
+  local profile="$1" config="$2" service unit state run_user="root"
   service="trusttunnel-client-$profile.service"
   unit="$SYSTEMD_UNIT_DIR/$service"
+  state="$(source_route_state_file "$profile")"
+  load_source_route_state "$profile" || return 1
+  if [[ "${SOURCE_MODE:-auto}" == "specific" ]]; then
+    [[ -n "${SOURCE_USER:-}" && "${SOURCE_UID:-}" =~ ^[1-9][0-9]*$ ]] || {
+      error "Source-routing state for $profile is incomplete."
+      return 1
+    }
+    ensure_source_route_helper || return 1
+    run_user="$SOURCE_USER"
+    set_profile_runtime_permissions "$profile" specific "$run_user" || return 1
+  else
+    set_profile_runtime_permissions "$profile" auto || return 1
+  fi
   umask 077
-  command cat > "$unit" <<EOF_UNIT
+  if [[ "${SOURCE_MODE:-auto}" == "specific" ]]; then
+    command cat > "$unit" <<EOF_UNIT
+[Unit]
+Description=TrustTunnel Client Profile: $profile
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=$run_user
+WorkingDirectory=$CLIENT_DIR
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# A selected IPv4 source cannot safely govern IPv6 sockets; keep this profile IPv4-only.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+ExecStartPre=+$SOURCE_ROUTE_HELPER apply $state
+ExecStart=$CLIENT_DIR/trusttunnel_client -c $config
+ExecStopPost=+$SOURCE_ROUTE_HELPER remove $state
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+  else
+    command cat > "$unit" <<EOF_UNIT
 [Unit]
 Description=TrustTunnel Client Profile: $profile
 Wants=network-online.target
@@ -2311,8 +2669,9 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
+  fi
   chmod 0644 "$unit"
-  systemctl daemon-reload
+  systemctl daemon-reload || return 1
   systemctl enable "$service" >/dev/null 2>&1 || true
 }
 
@@ -2333,7 +2692,7 @@ start_profile_client() {
 }
 
 configure_client_profile() {
-  local endpoint_file profile profile_dir service mode socks_port="" socks_user="" socks_password=""
+  local endpoint_file profile profile_dir service mode socks_port="" socks_user="" socks_password="" source_choice="auto"
   local imported generated candidate wizard_log default_port backup_path=""
   local had_profile=0 was_active=0
   banner
@@ -2366,6 +2725,7 @@ configure_client_profile() {
     if ! ensure_profile_socks_port_available "$socks_port" "$profile"; then pause; return 1; fi
     socks_user="$(ask_username "SOCKS5 username for profile $profile")" || return 1
     socks_password="$(ask_secret "SOCKS5 password for profile $profile (any length, including empty)" 0)" || return 1
+    source_choice="$(choose_client_source_ip)" || return 1
   fi
 
   if [[ ! -x "$CLIENT_DIR/trusttunnel_client" || ! -x "$CLIENT_DIR/setup_wizard" ]]; then
@@ -2431,7 +2791,18 @@ configure_client_profile() {
     fi
   fi
 
-  systemctl stop "$service" >/dev/null 2>&1 || true
+  if [[ "$had_profile" == "1" ]]; then
+    if ! systemctl stop "$service" >/dev/null 2>&1; then
+      error "Could not stop the existing client profile safely. Restoring the previous profile."
+      rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
+      unset socks_password
+      pause
+      return 1
+    fi
+    remove_profile_source_policy "$profile"
+  else
+    systemctl stop "$service" >/dev/null 2>&1 || true
+  fi
   if [[ "$mode" == "socks" ]] && ! ensure_profile_socks_port_available "$socks_port" "$profile"; then
     rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
     unset socks_password
@@ -2440,6 +2811,25 @@ configure_client_profile() {
   fi
   install -m 0600 "$candidate" "$profile_dir/client.toml"
   rm -f "$candidate" "$generated"
+  if [[ "$mode" == "socks" ]]; then
+    if [[ "$source_choice" == "auto" ]]; then
+      write_source_route_state "$profile" auto || {
+        rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
+        unset socks_password
+        pause
+        return 1
+      }
+    else
+      write_source_route_state "$profile" specific "$source_choice" || {
+        rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
+        unset socks_password
+        pause
+        return 1
+      }
+    fi
+  else
+    rm -f -- "$(source_route_state_file "$profile")"
+  fi
   if ! write_profile_client_unit "$profile" "$profile_dir/client.toml"; then
     rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
     unset socks_password
@@ -2453,6 +2843,16 @@ configure_client_profile() {
     return 1
   fi
 
+  if [[ "$mode" == "socks" ]]; then
+    if ! test_socks "127.0.0.1" "$socks_port" "$socks_user" "$socks_password"; then
+      error "The client service started, but the end-to-end tunnel test failed. Rolling back the profile."
+      rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
+      unset socks_password
+      pause
+      return 1
+    fi
+  fi
+
   ROLE="iran"
   CLIENT_MODE="$mode"
   SOCKS_ADDRESS="127.0.0.1"
@@ -2462,7 +2862,6 @@ configure_client_profile() {
 
   printf '\n'
   if [[ "$mode" == "socks" ]]; then
-    test_socks "127.0.0.1" "$socks_port" "$socks_user" "$socks_password" || true
     unset socks_password
     hr
     ok "Client profile $profile is ready."
@@ -2772,6 +3171,9 @@ show_instance_details() {
     [[ -n "$socks_user" ]] && printf 'SOCKS username   : %s\n' "$socks_user"
     [[ "$mode" == "SOCKS5" ]] && printf 'SOCKS password   : hidden\n'
     printf 'Kill switch      : %s\n' "${killswitch:-default}"
+    if [[ "$primary" == "$CLIENT_PROFILES_DIR/"*/client.toml ]]; then
+      printf 'Client source IP : %s\n' "$(source_route_summary "$(basename "$(dirname "$primary")")")"
+    fi
   fi
   pause
 }
@@ -2898,6 +3300,20 @@ edit_instance_config() {
   fi
   "${editor_command[@]}" "$file" || { error "The editor exited with an error. The original backup is unchanged."; pause; return 1; }
   chmod 0600 "$file" 2>/dev/null || true
+  if [[ "${DISC_ROLE[$index]:-}" == "client" && "${DISC_PRIMARY[$index]:-}" == "$CLIENT_PROFILES_DIR/"*/client.toml ]]; then
+    local edit_profile
+    edit_profile="$(basename "$(dirname "${DISC_PRIMARY[$index]}")")"
+    load_source_route_state "$edit_profile" || true
+    if [[ "${SOURCE_MODE:-auto}" == "specific" ]]; then
+      if ! set_profile_runtime_permissions "$edit_profile" specific "${SOURCE_USER:-}"; then
+        error "Could not restore the runtime permissions required by source-IP isolation. Restoring the edit backup."
+        cp -a -- "$backup_file" "$file"
+        set_profile_runtime_permissions "$edit_profile" specific "${SOURCE_USER:-}" >/dev/null 2>&1 || true
+        pause
+        return 1
+      fi
+    fi
+  fi
   service="${DISC_SERVICE[$index]:-}"
   if [[ -n "$service" ]]; then
     if restart_discovered_instance "$index"; then
@@ -2965,7 +3381,11 @@ remove_discovered_instance() {
   [[ -n "$service" ]] && rm -f -- "$SYSTEMD_UNIT_DIR/$service"
   if [[ "$choice" == "2" ]]; then
     if [[ -n "$profile_dir" ]]; then
-      if safe_client_profile_directory "$profile_dir"; then rm -rf -- "$profile_dir"; ok "Removed client profile directory: $profile_dir"; fi
+      if safe_client_profile_directory "$profile_dir"; then
+        cleanup_profile_source_assets "$(basename "$profile_dir")" 1
+        rm -rf -- "$profile_dir"
+        ok "Removed client profile directory: $profile_dir"
+      fi
     else
       for ((i=0; i<DISC_COUNT; i++)); do
         [[ "$(dirname "${DISC_PRIMARY[$i]:-/}")" == "$install_dir" ]] && same_dir_count=$((same_dir_count + 1))
@@ -3226,6 +3646,155 @@ show_endpoint_connections() {
   pause
 }
 
+show_client_source_policy() {
+  local index="$1" primary profile service state pid
+  primary="${DISC_PRIMARY[$index]:-}"
+  profile="$(basename "$(dirname "$primary")")"
+  service="${DISC_SERVICE[$index]:-trusttunnel-client-$profile.service}"
+  banner
+  printf '%sTrustTunnel Client Source-IP Policy%s\n\n' "$BOLD" "$NC"
+  if [[ "$primary" != "$CLIENT_PROFILES_DIR/"*/client.toml ]]; then
+    warn "Source-IP management is available for manager-created client profiles only."
+    pause
+    return 1
+  fi
+  printf 'Profile : %s\n' "$profile"
+  printf 'Service : %s\n' "$service"
+  printf 'Mode    : %s\n' "$(source_route_summary "$profile")"
+  state="$(source_route_state_file "$profile")"
+  if [[ -r "$state" ]]; then
+    load_source_route_state "$profile" || true
+    if [[ "${SOURCE_MODE:-auto}" == "specific" ]]; then
+      printf '\nLinux rule:\n'
+      ip -4 rule show 2>/dev/null | grep -E "(^|[[:space:]])${SOURCE_PRIORITY}:|lookup ${SOURCE_TABLE}([[:space:]]|$)" || printf '  (not currently installed)\n'
+      printf '\nRouting table %s:\n' "$SOURCE_TABLE"
+      ip -4 route show table "$SOURCE_TABLE" 2>/dev/null | sed 's/^/  /' || true
+      pid="$(systemctl show "$service" -p MainPID --value 2>/dev/null || true)"
+      if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        printf '\nCurrent TrustTunnel TCP sockets (PID %s):\n' "$pid"
+        ss -Hntp 2>/dev/null | grep "pid=$pid," | sed 's/^/  /' || printf '  none currently established\n'
+      fi
+    fi
+  fi
+  pause
+}
+
+manage_client_source_ip() {
+  local index="$1" primary profile service choice selected source_mode backup_path="" was_active=0
+  local address username password port
+  primary="${DISC_PRIMARY[$index]:-}"
+  if [[ "$primary" != "$CLIENT_PROFILES_DIR/"*/client.toml ]]; then
+    error "Manage source IP is supported for manager-created SOCKS profiles only."
+    error "Recreate/import this legacy client as a profile first so rollback and per-profile isolation are safe."
+    pause
+    return 1
+  fi
+  if ! toml_has_section "$primary" "listener.socks"; then
+    error "Source-IP management is intentionally limited to SOCKS client profiles; TUN needs a separate routing design."
+    pause
+    return 1
+  fi
+  profile="$(basename "$(dirname "$primary")")"
+  service="${DISC_SERVICE[$index]:-trusttunnel-client-$profile.service}"
+  [[ "$service" == "trusttunnel-client-$profile.service" ]] || {
+    error "Unexpected service mapping for profile $profile: $service"
+    pause
+    return 1
+  }
+  while true; do
+    banner
+    printf '%sManage source IP - %s%s\n\n' "$BOLD" "$profile" "$NC"
+    printf 'Current: %s\n\n' "$(source_route_summary "$profile")"
+    printf '  1) Automatic (Linux default routing)\n'
+    printf '  2) Select a specific local IPv4\n'
+    printf '  3) Show routing policy / current sockets\n'
+    printf '  4) Test tunnel through this profile\n'
+    printf '  0) Back\n\n'
+    read -r -p "Select: " choice || return 0
+    case "$choice" in
+      0) return 0 ;;
+      3) show_client_source_policy "$index"; continue ;;
+      4)
+        address="$(toml_get "$primary" "listener.socks" "address" 2>/dev/null || true)"
+        username="$(toml_get "$primary" "listener.socks" "username" 2>/dev/null || true)"
+        password="$(toml_get "$primary" "listener.socks" "password" 2>/dev/null || true)"
+        port="${address##*:}"
+        test_socks "127.0.0.1" "$port" "$username" "$password" || true
+        pause
+        continue
+        ;;
+      1) source_mode="auto"; selected="" ;;
+      2)
+        selected="$(choose_client_source_ip)" || return 1
+        if [[ "$selected" == "auto" ]]; then source_mode="auto"; selected=""; else source_mode="specific"; fi
+        ;;
+      *) warn "Invalid option."; sleep 1; continue ;;
+    esac
+
+    printf '\n'
+    if [[ "$source_mode" == "specific" ]]; then
+      warn "This will restart $service and bind its outbound connections to source IPv4 $selected using UID-based policy routing."
+    else
+      warn "This will restart $service and return its outbound connections to normal Linux source-address selection."
+    fi
+    confirm "Apply this source-IP change with automatic rollback on failure?" "y" || continue
+
+    systemctl is-active --quiet "$service" 2>/dev/null && was_active=1 || was_active=0
+    backup_client_profile "$profile" || { pause; return 1; }
+    backup_path="$LAST_BACKUP_PATH"
+    if ! systemctl stop "$service"; then
+      error "Could not stop $service safely; no source-IP changes were applied."
+      if [[ "$was_active" == "1" ]]; then
+        systemctl start "$service" >/dev/null 2>&1 || error "The previous service also could not be restarted; inspect its status/logs."
+      fi
+      pause
+      return 1
+    fi
+    remove_profile_source_policy "$profile"
+
+    if [[ "$source_mode" == "specific" ]]; then
+      if ! write_source_route_state "$profile" specific "$selected"; then
+        rollback_client_profile "$profile" "$backup_path" 1 "$was_active"
+        pause
+        return 1
+      fi
+    else
+      if ! write_source_route_state "$profile" auto; then
+        rollback_client_profile "$profile" "$backup_path" 1 "$was_active"
+        pause
+        return 1
+      fi
+    fi
+
+    if ! write_profile_client_unit "$profile" "$primary"; then
+      error "Could not write the updated client service. Rolling back."
+      rollback_client_profile "$profile" "$backup_path" 1 "$was_active"
+      pause
+      return 1
+    fi
+    if ! start_profile_client "$profile"; then
+      rollback_client_profile "$profile" "$backup_path" 1 "$was_active"
+      pause
+      return 1
+    fi
+
+    address="$(toml_get "$primary" "listener.socks" "address" 2>/dev/null || true)"
+    username="$(toml_get "$primary" "listener.socks" "username" 2>/dev/null || true)"
+    password="$(toml_get "$primary" "listener.socks" "password" 2>/dev/null || true)"
+    port="${address##*:}"
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || ! test_socks "127.0.0.1" "$port" "$username" "$password"; then
+      error "The service started, but the end-to-end SOCKS tunnel test failed. Rolling back to the previous working source-IP setup."
+      rollback_client_profile "$profile" "$backup_path" 1 "$was_active"
+      pause
+      return 1
+    fi
+    ok "Source-IP change completed successfully."
+    printf 'Current: %s\n' "$(source_route_summary "$profile")"
+    pause
+    return 0
+  done
+}
+
 show_client_outbound_details() {
   local index="$1" primary address username profile
   primary="${DISC_PRIMARY[$index]:-}"
@@ -3276,6 +3845,13 @@ manage_discovered_instance() {
       printf ' 13) Manage route (Direct/SOCKS5)\n'
     else
       printf '  9) Show 3x-ui SOCKS outbound details\n'
+      if toml_has_section "${DISC_PRIMARY[$index]:-}" "listener.socks"; then
+        if [[ "${DISC_PRIMARY[$index]:-}" == "$CLIENT_PROFILES_DIR/"*/client.toml ]]; then
+          printf ' 10) Manage source IP (%s)\n' "$(source_route_summary "$(basename "$(dirname "${DISC_PRIMARY[$index]}")")")"
+        else
+          printf ' 10) Manage source IP (profile migration required)\n'
+        fi
+      fi
     fi
     printf '  0) Back\n\n'
     read -r -p "Select: " choice || return 0
@@ -3299,7 +3875,11 @@ manage_discovered_instance() {
         if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then manage_endpoint_client_accounts "$index"; else show_client_outbound_details "$index"; fi
         ;;
       10)
-        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then show_endpoint_connections "$index"; else warn "Invalid option."; fi
+        if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then
+          show_endpoint_connections "$index"
+        else
+          manage_client_source_ip "$index"
+        fi
         ;;
       11)
         if [[ "${DISC_ROLE[$index]:-}" == "endpoint" ]]; then toggle_endpoint_metrics "$index"; else warn "Invalid option."; fi

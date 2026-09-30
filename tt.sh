@@ -7,7 +7,7 @@
 set -uo pipefail
 IFS=$'\n\t'
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.5.0"
+APP_VERSION="0.5.1"
 INSTALL_PATH="${TT_MANAGER_INSTALL_PATH:-/usr/local/bin/trusttunnel-manager}"
 MANAGER_INSTALL_URL="${TT_MANAGER_INSTALL_URL:-https://raw.githubusercontent.com/Colaabi75/tt/main/tt.sh}"
 STATE_DIR="/etc/trusttunnel-manager"
@@ -42,6 +42,7 @@ SOCKS_ADDRESS="127.0.0.1"
 SOCKS_PORT=""
 SOCKS_USERNAME=""
 LAST_BACKUP_PATH=""
+LAST_ENDPOINT_BACKUP_PATH=""
 DISC_COUNT=0
 declare -a DISC_ROLE=()
 declare -a DISC_SERVICE=()
@@ -51,6 +52,10 @@ declare -a DISC_PRIMARY=()
 declare -a DISC_SECONDARY=()
 declare -a DISC_WORKDIR=()
 declare -a DISC_SOURCE=()
+
+# Configuration files and manager logs contain credentials and other sensitive data.
+# Start with a restrictive umask; specific runtime files are opened up explicitly later.
+umask 077
 
 if [[ -t 1 ]]; then
   RED=$'\033[0;31m'
@@ -328,7 +333,9 @@ ask_domain() {
   done
 }
 valid_port() {
-  [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+  [[ "$1" =~ ^[0-9]+$ ]] || return 1
+  [[ ${#1} -le 5 ]] || return 1
+  (( 10#$1 >= 1 && 10#$1 <= 65535 ))
 }
 
 ask_port() {
@@ -466,7 +473,8 @@ ask_certificate_path() {
 }
 
 ask_private_key_path() {
-  local cert="$1" default="${2:-$(dirname "$cert")}" input
+  local cert="$1" default input
+  default="${2:-$(dirname "$cert")}"
   input="$(ask_value "Private-key file or directory (.key/.pem)" "$default")" || return 1
   select_private_key_path "$cert" "$input"
 }
@@ -481,10 +489,19 @@ toml_escape() {
 }
 
 ensure_state_dirs() {
-  install -d -m 0700 "$STATE_DIR" "$BACKUP_DIR" "$EXPORT_DIR" "$CLIENT_PROFILES_DIR"
+  # Source-routed client profiles run as dedicated unprivileged users. Those
+  # users need execute/traverse permission on the two parent directories, but
+  # must not be able to list or read the manager state, backups, or exports.
+  install -d -m 0711 "$STATE_DIR" "$CLIENT_PROFILES_DIR" || return 1
+  install -d -m 0700 "$BACKUP_DIR" "$EXPORT_DIR" || return 1
+  chmod 0711 "$STATE_DIR" "$CLIENT_PROFILES_DIR" || return 1
+  chmod 0700 "$BACKUP_DIR" "$EXPORT_DIR" || return 1
+  [[ -f "$STATE_FILE" ]] && chmod 0600 "$STATE_FILE" || true
+  find "$STATE_DIR" -maxdepth 1 -type f \
+    \( -name '*.log' -o -name '*.env' \) -exec chmod 0600 {} + 2>/dev/null || true
 }
 save_state() {
-  ensure_state_dirs
+  ensure_state_dirs || return 1
   umask 077
   {
     printf 'ROLE=%q\n' "$ROLE"
@@ -504,6 +521,12 @@ load_state() {
   [[ -f "$STATE_FILE" ]] || return 0
   if [[ "$(stat -c '%u' "$STATE_FILE" 2>/dev/null || echo 1)" != "0" ]]; then
     warn "The state file is not owned by root and was not loaded for security reasons."
+    return 0
+  fi
+  local state_mode
+  state_mode="$(stat -c '%a' "$STATE_FILE" 2>/dev/null || printf '999')"
+  if [[ ! "$state_mode" =~ ^[0-7]00$ ]]; then
+    warn "The state file permissions are not root-only; the state was not loaded for security reasons."
     return 0
   fi
   # shellcheck disable=SC1090
@@ -818,27 +841,74 @@ discover_installations() {
 
 timestamp() { date '+%Y%m%d-%H%M%S-%N'; }
 backup_endpoint() {
+  LAST_ENDPOINT_BACKUP_PATH=""
   [[ -d "$ENDPOINT_DIR" || -f "$ENDPOINT_UNIT" ]] || return 0
   local dst="$BACKUP_DIR/endpoint-$(timestamp)"
-  install -d -m 0700 "$dst"
+  install -d -m 0700 "$dst" || return 1
   local file
   for file in vpn.toml hosts.toml credentials.toml rules.toml; do
-    [[ -f "$ENDPOINT_DIR/$file" ]] && cp -a "$ENDPOINT_DIR/$file" "$dst/"
+    if [[ -f "$ENDPOINT_DIR/$file" ]] && ! cp -a -- "$ENDPOINT_DIR/$file" "$dst/"; then
+      rm -rf -- "$dst"
+      error "Could not back up Endpoint file: $file"
+      return 1
+    fi
   done
-  [[ -f "$ENDPOINT_UNIT" ]] && cp -a "$ENDPOINT_UNIT" "$dst/"
-  [[ -f "$STATE_FILE" ]] && cp -a "$STATE_FILE" "$dst/"
+  if [[ -f "$ENDPOINT_UNIT" ]] && ! cp -a -- "$ENDPOINT_UNIT" "$dst/"; then
+    rm -rf -- "$dst"
+    error "Could not back up the Endpoint systemd unit."
+    return 1
+  fi
+  if [[ -f "$STATE_FILE" ]] && ! cp -a -- "$STATE_FILE" "$dst/"; then
+    rm -rf -- "$dst"
+    error "Could not back up the manager state file."
+    return 1
+  fi
+  chmod -R go-rwx "$dst" || { rm -rf -- "$dst"; return 1; }
+  LAST_ENDPOINT_BACKUP_PATH="$dst"
   ok "Previous endpoint configuration backed up to: $dst"
+}
+restore_endpoint_backup() {
+  local backup="$1" file unit_backup
+  [[ -d "$backup" ]] || return 1
+  install -d -m 0755 "$ENDPOINT_DIR" || return 1
+  for file in vpn.toml hosts.toml credentials.toml rules.toml; do
+    if [[ -f "$backup/$file" ]]; then
+      install -m 0600 "$backup/$file" "$ENDPOINT_DIR/$file" || return 1
+    else
+      rm -f -- "$ENDPOINT_DIR/$file" || return 1
+    fi
+  done
+  unit_backup="$backup/$(basename "$ENDPOINT_UNIT")"
+  if [[ -f "$unit_backup" ]]; then
+    install -m 0644 "$unit_backup" "$ENDPOINT_UNIT" || return 1
+  else
+    rm -f -- "$ENDPOINT_UNIT" || return 1
+  fi
+  systemctl daemon-reload || return 1
 }
 backup_client() {
   [[ -d "$CLIENT_DIR" || -f "$CLIENT_UNIT" ]] || return 0
   local dst="$BACKUP_DIR/client-$(timestamp)"
-  install -d -m 0700 "$dst"
+  install -d -m 0700 "$dst" || return 1
   local file
   for file in trusttunnel_client.toml endpoint.toml; do
-    [[ -f "$CLIENT_DIR/$file" ]] && cp -a "$CLIENT_DIR/$file" "$dst/"
+    if [[ -f "$CLIENT_DIR/$file" ]] && ! cp -a -- "$CLIENT_DIR/$file" "$dst/"; then
+      rm -rf -- "$dst"
+      error "Could not back up Client file: $file"
+      return 1
+    fi
   done
-  [[ -f "$CLIENT_UNIT" ]] && cp -a "$CLIENT_UNIT" "$dst/"
-  [[ -f "$STATE_FILE" ]] && cp -a "$STATE_FILE" "$dst/"
+  if [[ -f "$CLIENT_UNIT" ]] && ! cp -a -- "$CLIENT_UNIT" "$dst/"; then
+    rm -rf -- "$dst"
+    error "Could not back up the Client systemd unit."
+    return 1
+  fi
+  if [[ -f "$STATE_FILE" ]] && ! cp -a -- "$STATE_FILE" "$dst/"; then
+    rm -rf -- "$dst"
+    error "Could not back up the manager state file."
+    return 1
+  fi
+  chmod -R go-rwx "$dst" || { rm -rf -- "$dst"; return 1; }
   ok "Previous client configuration backed up to: $dst"
 }
 download_and_run_installer() {
@@ -847,8 +917,13 @@ download_and_run_installer() {
   tmp="$(mktemp)" || return 1
   info "Downloading the official $label installer..."
   if ! curl -fL --connect-timeout 10 --retry 2 --retry-delay 2 -o "$tmp" "$url"; then
-    rm -f "$tmp"
+    rm -f -- "$tmp"
     error "The official installer could not be downloaded. Check Internet and GitHub access."
+    return 1
+  fi
+  if [[ ! -s "$tmp" ]] || ! bash -n "$tmp" >/dev/null 2>&1; then
+    rm -f -- "$tmp"
+    error "The downloaded official installer is empty or has invalid Bash syntax. It was not executed."
     return 1
   fi
   bash "$tmp" "$@"
@@ -1057,10 +1132,16 @@ generate_endpoint_config() {
     error "Could not configure endpoint forward_protocol."
     return 1
   fi
-  write_endpoint_credentials "$username" "$password"
-  write_endpoint_hosts "$domain" "$cert" "$key"
-  [[ -f "$ENDPOINT_DIR/rules.toml" ]] || : > "$ENDPOINT_DIR/rules.toml"
-  chmod 0600 "$ENDPOINT_DIR"/*.toml
+  write_endpoint_credentials "$username" "$password" || {
+    error "Could not write Endpoint credentials.toml."
+    return 1
+  }
+  write_endpoint_hosts "$domain" "$cert" "$key" || {
+    error "Could not write Endpoint hosts.toml."
+    return 1
+  }
+  [[ -f "$ENDPOINT_DIR/rules.toml" ]] || : > "$ENDPOINT_DIR/rules.toml" || return 1
+  chmod 0600 "$ENDPOINT_DIR"/*.toml || return 1
   return 0
 }
 
@@ -1475,7 +1556,7 @@ manage_endpoint_client_accounts() {
 }
 configure_endpoint() {
   local domain cert key port username password was_active=0 existing_users account_count=0
-  local route_mode current_route_mode current_route_port route_port=""
+  local route_mode current_route_mode current_route_port route_port="" backup_path=""
   banner
   printf '%sForeign Server Setup (Endpoint)%s\n\n' "$BOLD" "$NC"
   info "Port 443 is preferred, but a different free TCP/UDP port can be used."
@@ -1533,8 +1614,15 @@ configure_endpoint() {
     }
     info "Endpoint egress will use local SOCKS5 at 127.0.0.1:$route_port"
   fi
-  backup_endpoint
+  if ! backup_endpoint; then
+    (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
+    unset password
+    pause
+    return 1
+  fi
+  backup_path="$LAST_ENDPOINT_BACKUP_PATH"
   if ! download_and_run_installer "$ENDPOINT_INSTALL_URL" "TrustTunnel Endpoint"; then
+    if [[ -n "$backup_path" ]]; then restore_endpoint_backup "$backup_path" || true; fi
     (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
     unset password
     pause
@@ -1542,20 +1630,42 @@ configure_endpoint() {
   fi
   if [[ ! -x "$ENDPOINT_DIR/trusttunnel_endpoint" || ! -x "$ENDPOINT_DIR/setup_wizard" ]]; then
     error "The endpoint executables were not found after installation."
+    if [[ -n "$backup_path" ]]; then restore_endpoint_backup "$backup_path" || true; fi
+    (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
     unset password
     pause
     return 1
   fi
-  generate_endpoint_config "$domain" "$cert" "$key" "$port" "$username" "$password" "$route_mode" "$route_port" || {
+  if ! generate_endpoint_config "$domain" "$cert" "$key" "$port" "$username" "$password" "$route_mode" "$route_port"; then
+    if [[ -n "$backup_path" ]]; then restore_endpoint_backup "$backup_path" || true; fi
+    (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
     unset password
     pause
     return 1
-  }
+  fi
   unset password
 
-  validate_endpoint_runtime "$port" || { pause; return 1; }
-  write_endpoint_unit || { pause; return 1; }
-  start_endpoint || { pause; return 1; }
+  if ! validate_endpoint_runtime "$port"; then
+    error "Endpoint runtime validation failed. Restoring the previous Endpoint configuration."
+    if [[ -n "$backup_path" ]]; then restore_endpoint_backup "$backup_path" || true; fi
+    (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
+    pause
+    return 1
+  fi
+  if ! write_endpoint_unit; then
+    error "Could not write the Endpoint systemd unit. Restoring the previous configuration."
+    if [[ -n "$backup_path" ]]; then restore_endpoint_backup "$backup_path" || true; fi
+    (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
+    pause
+    return 1
+  fi
+  if ! start_endpoint; then
+    error "The new Endpoint configuration did not remain active. Restoring the previous configuration."
+    if [[ -n "$backup_path" ]]; then restore_endpoint_backup "$backup_path" || true; fi
+    (( was_active == 1 )) && systemctl start "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
+    pause
+    return 1
+  fi
 
   ROLE="foreign"
   DOMAIN="$domain"
@@ -1566,7 +1676,9 @@ configure_endpoint() {
   CLIENT_MODE=""
   SOCKS_PORT=""
   SOCKS_USERNAME=""
-  save_state
+  if ! save_state; then
+    warn "The Endpoint is running, but the manager state could not be saved. Review $STATE_FILE before relying on automatic discovery."
+  fi
   test_endpoint_tls "$domain" "$port" || true
   export_client_toml "$username" "$port" || { pause; return 1; }
 
@@ -1649,13 +1761,22 @@ strip_listener_sections() {
 }
 set_killswitch_false() {
   local file="$1" tmp
+  [[ -f "$file" ]] || return 1
   if grep -Eq '^[[:space:]]*killswitch_enabled[[:space:]]*=' "$file"; then
     sed -i -E 's/^[[:space:]]*killswitch_enabled[[:space:]]*=.*/killswitch_enabled = false/' "$file"
   else
-    tmp="$(mktemp)" || return 1
-    printf 'killswitch_enabled = false\n' > "$tmp"
-    command cat "$file" >> "$tmp"
-    mv "$tmp" "$file"
+    tmp="$(mktemp "$(dirname "$file")/.killswitch.XXXXXX")" || return 1
+    if ! {
+      printf 'killswitch_enabled = false\n'
+      command cat "$file"
+    } > "$tmp"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    if ! mv -f -- "$tmp" "$file"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
   fi
 }
 prepare_socks_config() {
@@ -1672,9 +1793,9 @@ prepare_socks_config() {
 }
 prepare_tun_config() {
   local source="$1" target="$2"
-  cp "$source" "$target"
-  set_killswitch_false "$target"
-  chmod 0600 "$target"
+  cp -- "$source" "$target" || return 1
+  set_killswitch_false "$target" || return 1
+  chmod 0600 "$target" || return 1
 }
 
 port_listener() {
@@ -2201,7 +2322,7 @@ allocate_source_route_ids() {
 }
 
 ensure_profile_source_user() {
-  local profile="$1" user uid shell
+  local profile="$1" user uid shell created=0
   user="$(profile_source_user_name "$profile")"
   shell="$(command -v nologin 2>/dev/null || true)"
   [[ -n "$shell" ]] || shell="/bin/false"
@@ -2210,10 +2331,11 @@ ensure_profile_source_user() {
       error "Could not create the dedicated TrustTunnel source-routing user $user."
       return 1
     }
+    created=1
   fi
   uid="$(id -u "$user" 2>/dev/null || true)"
   [[ "$uid" =~ ^[1-9][0-9]*$ ]] || { error "Could not determine UID for $user."; return 1; }
-  printf '%s %s\n' "$user" "$uid"
+  printf '%s %s %s\n' "$user" "$uid" "$created"
 }
 
 detect_source_route_path() {
@@ -2243,27 +2365,39 @@ detect_source_route_path() {
 
 write_source_route_state() {
   local profile="$1" mode="$2" source_ip="${3:-}" state profile_dir ids user_info path iface gateway user uid table priority
+  local previous_user="" previous_created="0" created="0"
   profile_dir="$CLIENT_PROFILES_DIR/$profile"
   state="$(source_route_state_file "$profile")"
-  install -d -m 0700 "$profile_dir"
-  if [[ "$mode" == "auto" ]]; then
-    command cat > "$state" <<EOF_STATE
-SOURCE_MODE=auto
-EOF_STATE
-    chmod 0600 "$state"
-    return 0
-  fi
-  path="$(detect_source_route_path "$source_ip")" || return 1
-  IFS='|' read -r iface gateway <<< "$path"
-  user_info="$(ensure_profile_source_user "$profile")" || return 1
-  IFS=' ' read -r user uid <<< "$user_info"
+  install -d -m 0700 "$profile_dir" || return 1
+
   if [[ -f "$state" ]]; then
-    SOURCE_TABLE="" SOURCE_PRIORITY=""
+    SOURCE_TABLE="" SOURCE_PRIORITY="" SOURCE_USER="" SOURCE_USER_CREATED="0"
     # shellcheck disable=SC1090
     source "$state" 2>/dev/null || true
+    previous_user="${SOURCE_USER:-}"
+    previous_created="${SOURCE_USER_CREATED:-0}"
     table="${SOURCE_TABLE:-}"; priority="${SOURCE_PRIORITY:-}"
   else
     table=""; priority=""
+  fi
+
+  if [[ "$mode" == "auto" ]]; then
+    umask 077
+    command cat > "$state" <<EOF_STATE
+SOURCE_MODE=auto
+SOURCE_USER=$previous_user
+SOURCE_USER_CREATED=$previous_created
+EOF_STATE
+    chmod 0600 "$state" || return 1
+    return 0
+  fi
+
+  path="$(detect_source_route_path "$source_ip")" || return 1
+  IFS='|' read -r iface gateway <<< "$path"
+  user_info="$(ensure_profile_source_user "$profile")" || return 1
+  IFS=' ' read -r user uid created <<< "$user_info"
+  if [[ "$previous_user" == "$user" && "$previous_created" == "1" ]]; then
+    created=1
   fi
   if [[ ! "$table" =~ ^[1-9][0-9]*$ || ! "$priority" =~ ^[1-9][0-9]*$ ]]; then
     ids="$(allocate_source_route_ids "$profile")" || { error "Could not allocate an isolated policy-routing table for $profile."; return 1; }
@@ -2279,28 +2413,34 @@ SOURCE_TABLE=$table
 SOURCE_PRIORITY=$priority
 SOURCE_UID=$uid
 SOURCE_USER=$user
+SOURCE_USER_CREATED=$created
 EOF_STATE
-  chmod 0600 "$state"
+  chmod 0600 "$state" || return 1
 }
 
 load_source_route_state() {
   local profile="$1" state
   state="$(source_route_state_file "$profile")"
   SOURCE_MODE="auto" SOURCE_IP="" SOURCE_IFACE="" SOURCE_GATEWAY=""
-  SOURCE_TABLE="" SOURCE_PRIORITY="" SOURCE_UID="" SOURCE_USER=""
+  SOURCE_TABLE="" SOURCE_PRIORITY="" SOURCE_UID="" SOURCE_USER="" SOURCE_USER_CREATED="0"
   [[ -r "$state" ]] || return 0
   # shellcheck disable=SC1090
   source "$state" 2>/dev/null || return 1
 }
 
 set_profile_runtime_permissions() {
-  local profile="$1" mode="$2" profile_dir="$CLIENT_PROFILES_DIR/$profile" user="${3:-}"
+  local profile="$1" mode="$2" profile_dir user="${3:-}" gid=""
+  profile_dir="$CLIENT_PROFILES_DIR/$profile"
   [[ -d "$profile_dir" ]] || return 1
   if [[ "$mode" == "specific" ]]; then
     [[ -n "$user" ]] || return 1
-    chown root:"$user" "$profile_dir" || return 1
+    gid="$(id -g "$user" 2>/dev/null || true)"
+    [[ "$gid" =~ ^[0-9]+$ ]] || return 1
+    # Use the user's actual primary GID instead of assuming useradd created a
+    # same-named group. This also works with pre-existing system accounts.
+    chown root:"$gid" "$profile_dir" || return 1
     chmod 0750 "$profile_dir" || return 1
-    [[ -f "$profile_dir/client.toml" ]] && { chown root:"$user" "$profile_dir/client.toml" || return 1; chmod 0640 "$profile_dir/client.toml" || return 1; }
+    [[ -f "$profile_dir/client.toml" ]] && { chown root:"$gid" "$profile_dir/client.toml" || return 1; chmod 0640 "$profile_dir/client.toml" || return 1; }
   else
     chown root:root "$profile_dir" || return 1
     chmod 0700 "$profile_dir" || return 1
@@ -2317,12 +2457,15 @@ remove_profile_source_policy() {
 }
 
 cleanup_profile_source_assets() {
-  local profile="$1" delete_user="${2:-0}" user=""
+  local profile="$1" delete_user="${2:-0}" user="" user_created="0"
   load_source_route_state "$profile" 2>/dev/null || true
   user="${SOURCE_USER:-}"
+  user_created="${SOURCE_USER_CREATED:-0}"
   [[ -n "$user" ]] || user="$(profile_source_user_name "$profile")"
   remove_profile_source_policy "$profile"
-  if [[ "$delete_user" == "1" && -n "$user" && "$user" == ttsrc_* ]]; then
+  # Never delete a pre-existing system account. Older state files have no
+  # ownership marker, so they are treated conservatively as pre-existing.
+  if [[ "$delete_user" == "1" && "$user_created" == "1" && -n "$user" && "$user" == ttsrc_* ]]; then
     userdel "$user" >/dev/null 2>&1 || true
   fi
 }
@@ -2556,24 +2699,38 @@ active_tun_client_exists() {
 }
 
 backup_client_profile() {
-  local profile="$1" profile_dir="$CLIENT_PROFILES_DIR/$profile" unit dst
+  local profile="$1" profile_dir unit dst
+  profile_dir="$CLIENT_PROFILES_DIR/$profile"
   unit="$SYSTEMD_UNIT_DIR/trusttunnel-client-$profile.service"
   LAST_BACKUP_PATH=""
   [[ -d "$profile_dir" || -f "$unit" ]] || return 0
   dst="$BACKUP_DIR/client-profile-$profile-$(timestamp)"
-  install -d -m 0700 "$dst"
-  [[ -d "$profile_dir" ]] && cp -a -- "$profile_dir" "$dst/profile"
-  [[ -f "$unit" ]] && cp -a -- "$unit" "$dst/"
-  chmod -R go-rwx "$dst"
+  install -d -m 0700 "$dst" || return 1
+  if [[ -d "$profile_dir" ]] && ! cp -a -- "$profile_dir" "$dst/profile"; then
+    rm -rf -- "$dst"
+    error "Could not back up client profile $profile."
+    return 1
+  fi
+  if [[ -f "$unit" ]] && ! cp -a -- "$unit" "$dst/"; then
+    rm -rf -- "$dst"
+    error "Could not back up the client profile systemd unit."
+    return 1
+  fi
+  chmod -R go-rwx "$dst" || { rm -rf -- "$dst"; return 1; }
   LAST_BACKUP_PATH="$dst"
   ok "Previous profile backed up to: $dst"
 }
 
 rollback_client_profile() {
   local profile="$1" backup_path="$2" had_profile="$3" was_active="$4"
-  local profile_dir="$CLIENT_PROFILES_DIR/$profile"
-  local service="trusttunnel-client-$profile.service"
-  local unit="$SYSTEMD_UNIT_DIR/$service" backup_unit
+  local profile_dir service unit backup_unit
+  profile_dir="$CLIENT_PROFILES_DIR/$profile"
+  service="trusttunnel-client-$profile.service"
+  unit="$SYSTEMD_UNIT_DIR/$service"
+  if [[ "$had_profile" == "1" && -z "$backup_path" ]]; then
+    error "Rollback was requested for an existing profile, but no backup is available. The existing profile was left in place to avoid data loss."
+    return 1
+  fi
   warn "Client profile setup failed. Restoring the previous state."
   systemctl disable --now "$service" >/dev/null 2>&1 || true
   if [[ "$had_profile" != "1" ]]; then
@@ -2676,7 +2833,8 @@ EOF_UNIT
 }
 
 start_profile_client() {
-  local profile="$1" service="trusttunnel-client-$profile.service"
+  local profile="$1" service
+  service="trusttunnel-client-$profile.service"
   if ! systemctl restart "$service"; then
     error "Client profile $profile failed to start."
     systemctl status "$service" --no-pager -l || true
@@ -2738,9 +2896,20 @@ configure_client_profile() {
     ok "TrustTunnel Client is already installed; the existing binary will be reused."
   fi
 
-  backup_client_profile "$profile"
+  if ! backup_client_profile "$profile"; then
+    error "Could not create a safe backup before changing profile $profile. No changes were applied."
+    unset socks_password
+    pause
+    return 1
+  fi
   backup_path="$LAST_BACKUP_PATH"
-  install -d -m 0700 "$profile_dir"
+  install -d -m 0700 "$profile_dir" || {
+    error "Could not create the client profile directory: $profile_dir"
+    rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
+    unset socks_password
+    pause
+    return 1
+  }
   imported="$profile_dir/endpoint.toml"
   generated="$profile_dir/generated.toml"
   candidate="$profile_dir/client.toml.new"
@@ -2858,7 +3027,9 @@ configure_client_profile() {
   SOCKS_ADDRESS="127.0.0.1"
   SOCKS_PORT="$socks_port"
   SOCKS_USERNAME="$socks_user"
-  save_state
+  if ! save_state; then
+    warn "The client profile is running, but the manager state could not be saved. Automatic discovery can still be used."
+  fi
 
   printf '\n'
   if [[ "$mode" == "socks" ]]; then
@@ -2901,7 +3072,12 @@ configure_client() {
       return 1
     fi
   fi
-  backup_client
+  if ! backup_client; then
+    error "Could not create a safe Client backup. No changes were applied."
+    unset socks_password
+    pause
+    return 1
+  fi
   if ! download_and_run_installer "$CLIENT_INSTALL_URL" "TrustTunnel Client"; then
     unset socks_password
     pause
@@ -2952,7 +3128,9 @@ configure_client() {
   ROLE="iran"
   DOMAIN="" CERT_PATH="" KEY_PATH="" ENDPOINT_USERNAME=""
   CLIENT_MODE="$mode" SOCKS_ADDRESS="127.0.0.1" SOCKS_PORT="$socks_port" SOCKS_USERNAME="$socks_user"
-  save_state
+  if ! save_state; then
+    warn "The legacy client is running, but the manager state could not be saved. Automatic discovery can still be used."
+  fi
   printf '\n'
   if [[ "$mode" == "socks" ]]; then
     test_socks "127.0.0.1" "$socks_port" "$socks_user" "$socks_password" || true
@@ -3367,7 +3545,13 @@ remove_discovered_instance() {
   banner
   warn "You are about to remove: $(instance_summary "$index")"
   printf 'Role   : %s\nService: %s\nPath   : %s\n\n' "${DISC_ROLE[$index]:-}" "${service:-unmanaged}" "$install_dir"
-  confirm "Create a configuration backup first?" "y" && backup_discovered_instance "$index"
+  if confirm "Create a configuration backup first?" "y"; then
+    if ! backup_discovered_instance "$index"; then
+      error "Removal cancelled because the configuration backup could not be created."
+      pause
+      return 1
+    fi
+  fi
   read -r -p "Type REMOVE to continue: " typed || return 1
   [[ "$typed" == "REMOVE" ]] || { warn "Removal cancelled."; pause; return 0; }
   printf '1) Remove service/config only\n2) Also remove detected installation/profile directory when safe\n'
@@ -3422,12 +3606,20 @@ update_discovered_instance() {
     for ((i=0; i<DISC_COUNT; i++)); do
       [[ "${DISC_ROLE[$i]:-}" == "client" ]] || continue
       [[ "${DISC_BINARY[$i]:-}" == "$binary" ]] || continue
-      backup_discovered_instance "$i"
+      if ! backup_discovered_instance "$i"; then
+        error "Update aborted because a backup could not be created for installation #$((i + 1))."
+        pause
+        return 1
+      fi
       item="${DISC_SERVICE[$i]:-}"
       if [[ -n "$item" && -z "${seen_services[$item]:-}" ]]; then services+=("$item"); seen_services[$item]=1; fi
     done
   else
-    backup_discovered_instance "$index"
+    if ! backup_discovered_instance "$index"; then
+      error "Update aborted because the configuration backup could not be created."
+      pause
+      return 1
+    fi
     [[ -n "$service" ]] && services+=("$service")
   fi
   for item in "${services[@]}"; do systemctl stop "$item" >/dev/null 2>&1 || true; done
@@ -4039,8 +4231,12 @@ restart_role_service() {
 
 update_core() {
   local service url label
-  if [[ "$ROLE" == "foreign" ]]; then service="$ENDPOINT_SERVICE" url="$ENDPOINT_INSTALL_URL" label="Endpoint"; backup_endpoint
-  elif [[ "$ROLE" == "iran" ]]; then service="$CLIENT_SERVICE" url="$CLIENT_INSTALL_URL" label="Client"; backup_client
+  if [[ "$ROLE" == "foreign" ]]; then
+    service="$ENDPOINT_SERVICE"; url="$ENDPOINT_INSTALL_URL"; label="Endpoint"
+    backup_endpoint || { error "Update aborted because the Endpoint backup could not be created."; pause; return 1; }
+  elif [[ "$ROLE" == "iran" ]]; then
+    service="$CLIENT_SERVICE"; url="$CLIENT_INSTALL_URL"; label="Client"
+    backup_client || { error "Update aborted because the Client backup could not be created."; pause; return 1; }
   else error "The server role is not configured."; pause; return 1; fi
   systemctl stop "$service" >/dev/null 2>&1 || true
   if download_and_run_installer "$url" "TrustTunnel $label"; then systemctl start "$service" || true; ok "TrustTunnel core was updated."; else error "The update failed."; systemctl start "$service" >/dev/null 2>&1 || true; fi
@@ -4056,14 +4252,22 @@ uninstall_role() {
   confirm "Create a configuration backup in $BACKUP_DIR before removal?" "y" && backup=1 || backup=0
   confirm "Are you sure you want to remove it?" "n" || return 0
   if [[ "$ROLE" == "foreign" ]]; then
-    (( backup == 1 )) && backup_endpoint
+    if (( backup == 1 )) && ! backup_endpoint; then
+      error "Removal aborted because the Endpoint backup could not be created."
+      pause
+      return 1
+    fi
     remove_endpoint_restart_schedule "$ENDPOINT_SERVICE" 1 || true
     systemctl disable --now "$ENDPOINT_SERVICE" >/dev/null 2>&1 || true
     rm -f "$ENDPOINT_UNIT"; rm -rf "$ENDPOINT_DIR"
     if [[ -f "$ENDPOINT_EXPORT" ]] && confirm "Also remove the current secret export file $ENDPOINT_EXPORT?" "y"; then rm -f "$ENDPOINT_EXPORT"; fi
     if [[ -f "$ROOT_ENDPOINT_EXPORT" ]] && confirm "Also remove the /root convenience copy $ROOT_ENDPOINT_EXPORT?" "y"; then rm -f "$ROOT_ENDPOINT_EXPORT"; fi
   elif [[ "$ROLE" == "iran" ]]; then
-    (( backup == 1 )) && backup_client
+    if (( backup == 1 )) && ! backup_client; then
+      error "Removal aborted because the Client backup could not be created."
+      pause
+      return 1
+    fi
     systemctl disable --now "$CLIENT_SERVICE" >/dev/null 2>&1 || true
     rm -f "$CLIENT_UNIT"; rm -rf "$CLIENT_DIR"
   else error "The server role is not configured."; pause; return 1; fi

@@ -7,7 +7,7 @@
 set -uo pipefail
 IFS=$'\n\t'
 APP_NAME="TrustTunnel Manager"
-APP_VERSION="0.5.1"
+APP_VERSION="0.5.2"
 INSTALL_PATH="${TT_MANAGER_INSTALL_PATH:-/usr/local/bin/trusttunnel-manager}"
 MANAGER_INSTALL_URL="${TT_MANAGER_INSTALL_URL:-https://raw.githubusercontent.com/Colaabi75/tt/main/tt.sh}"
 STATE_DIR="/etc/trusttunnel-manager"
@@ -29,6 +29,10 @@ CLIENT_SERVICE="trusttunnel-client.service"
 CLIENT_UNIT="$SYSTEMD_UNIT_DIR/$CLIENT_SERVICE"
 CLIENT_INSTALL_URL="https://raw.githubusercontent.com/TrustTunnel/TrustTunnelClient/refs/heads/master/scripts/install.sh"
 CLIENT_PROFILES_DIR="$STATE_DIR/clients"
+# Executable-only runtime location for unprivileged, source-selected SOCKS profiles.
+# Keep /opt/trusttunnel_client private: it may also contain root-only credentials.
+CLIENT_RUNTIME_DIR="/usr/local/libexec/trusttunnel-manager"
+CLIENT_RUNTIME_BIN="$CLIENT_RUNTIME_DIR/trusttunnel_client"
 SOURCE_ROUTE_HELPER="/usr/local/libexec/trusttunnel-source-route"
 
 ROLE=""
@@ -116,7 +120,7 @@ require_platform() {
 
 install_dependencies() {
   local missing=() cmd
-  for cmd in curl openssl awk sed grep find ss timeout getent readlink ps ip useradd sha256sum cksum; do
+  for cmd in curl openssl awk sed grep find ss timeout getent readlink ps ip useradd sha256sum cksum cmp runuser; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   [[ ${#missing[@]} -eq 0 ]] && return 0
@@ -124,7 +128,7 @@ install_dependencies() {
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y || return 1
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      curl openssl ca-certificates coreutils findutils iproute2 procps gawk grep sed passwd || return 1
+      curl openssl ca-certificates coreutils findutils iproute2 procps gawk grep sed passwd util-linux || return 1
   else
     error "Required tools are missing. Automatic dependency installation currently supports Debian/Ubuntu only."
     error "Missing tools: ${missing[*]}"
@@ -234,6 +238,22 @@ install_manager_from_url() {
   if ! curl -fL --connect-timeout 10 --retry 2 --retry-delay 2 -o "$tmp" "$url"; then
     rm -f -- "$tmp"
     error "The manager could not be downloaded. Check Internet and GitHub access."
+    return 1
+  fi
+
+  # Never silently replace a newer installed manager with an older remote copy.
+  local remote_version
+  remote_version="$(sed -n 's/^APP_VERSION="\([0-9][0-9.]*\)".*/\1/p' "$tmp" | head -n 1)"
+  if [[ ! "$remote_version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+    rm -f -- "$tmp"
+    error "The downloaded manager has no valid APP_VERSION; refusing to replace this version."
+    return 1
+  fi
+  if [[ "$remote_version" != "$APP_VERSION" ]] && \
+     [[ "$(printf '%s\n%s\n' "$remote_version" "$APP_VERSION" | sort -V | head -n 1)" == "$remote_version" ]]; then
+    rm -f -- "$tmp"
+    error "Refusing to downgrade manager v$APP_VERSION to remote v$remote_version."
+    error "Update the GitHub source to v$APP_VERSION or newer before using menu option 5."
     return 1
   fi
 
@@ -2167,11 +2187,12 @@ profile_source_user_name() {
 }
 
 ensure_source_route_helper() {
-  local dir
+  local dir tmp
   dir="$(dirname "$SOURCE_ROUTE_HELPER")"
   install -d -m 0755 "$dir" || return 1
+  tmp="$(mktemp "$dir/.trusttunnel-source-route.XXXXXXXX")" || return 1
   umask 077
-  command cat > "$SOURCE_ROUTE_HELPER" <<'EOF_SOURCE_HELPER'
+  if ! command cat > "$tmp" <<'EOF_SOURCE_HELPER'
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
@@ -2238,7 +2259,14 @@ if [[ -z "$probe" || "$probe" != *" dev $SOURCE_IFACE "* || "$probe" != *" src $
   fail "policy verification failed; expected dev $SOURCE_IFACE src $SOURCE_IP, got: ${probe:-no route}"
 fi
 EOF_SOURCE_HELPER
-  chmod 0755 "$SOURCE_ROUTE_HELPER"
+  then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! chmod 0755 "$tmp" || ! mv -fT -- "$tmp" "$SOURCE_ROUTE_HELPER"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 local_global_ipv4_records() {
@@ -2766,6 +2794,63 @@ rollback_client_profile() {
   fi
 }
 
+# The official installer can create /opt/trusttunnel_client with mode 0700
+# (inherited from our umask 077).  A source-selected profile runs as a
+# dedicated non-root UID, so executing or chdir'ing under /opt can fail with
+# systemd 200/CHDIR or 203/EXEC.  Do NOT chmod /opt/trusttunnel_client 0755:
+# it may contain root-only client configs/credentials.  Instead copy ONLY the
+# executable to a root-owned, world-executable libexec path, atomically.
+ensure_client_runtime_binary() {
+  local source="$CLIENT_DIR/trusttunnel_client" tmp owner
+  if [[ ! -f "$source" || ! -x "$source" || ! -r "$source" ]]; then
+    error "TrustTunnel Client executable is unavailable: $source"
+    return 1
+  fi
+  if [[ -L "$CLIENT_RUNTIME_DIR" ]]; then
+    error "Refusing a symbolic-link runtime directory: $CLIENT_RUNTIME_DIR"
+    return 1
+  fi
+  install -d -o root -g root -m 0755 "$CLIENT_RUNTIME_DIR" || return 1
+  owner="$(stat -c '%u:%g' "$CLIENT_RUNTIME_DIR" 2>/dev/null || true)"
+  [[ "$owner" == "0:0" ]] || { error "Runtime directory must belong to root: $CLIENT_RUNTIME_DIR"; return 1; }
+
+  if [[ -f "$CLIENT_RUNTIME_BIN" && ! -L "$CLIENT_RUNTIME_BIN" ]] && \
+     cmp -s -- "$source" "$CLIENT_RUNTIME_BIN" && \
+     [[ "$(stat -c '%u:%g:%a' "$CLIENT_RUNTIME_BIN" 2>/dev/null)" == "0:0:755" ]]; then
+    return 0
+  fi
+
+  tmp="$(mktemp "$CLIENT_RUNTIME_DIR/.trusttunnel-client.XXXXXXXX")" || return 1
+  if ! install -o root -g root -m 0755 -- "$source" "$tmp"; then
+    rm -f -- "$tmp"
+    error "Could not stage the TrustTunnel runtime executable."
+    return 1
+  fi
+  # Replacing a pathname, rather than modifying a running binary in place,
+  # is safe for already active profiles and does not require restarting them.
+  if ! mv -fT -- "$tmp" "$CLIENT_RUNTIME_BIN"; then
+    rm -f -- "$tmp"
+    error "Could not activate the staged TrustTunnel runtime executable."
+    return 1
+  fi
+}
+
+verify_profile_runtime_access() {
+  local profile="$1" user="$2" config="$3"
+  if ! command -v runuser >/dev/null 2>&1; then
+    error "runuser is required for a non-root profile permission check."
+    return 1
+  fi
+  if ! runuser -u "$user" -- test -x "$CLIENT_RUNTIME_BIN" ||
+     ! runuser -u "$user" -- test -x "$CLIENT_PROFILES_DIR/$profile" ||
+     ! runuser -u "$user" -- test -r "$config"; then
+    error "Profile $profile: user $user cannot access its binary, working directory, or config."
+    error "Inspect permissions with: namei -l $CLIENT_PROFILES_DIR/$profile/client.toml"
+    return 1
+  fi
+  return 0
+}
+
 write_profile_client_unit() {
   local profile="$1" config="$2" service unit state run_user="root"
   service="trusttunnel-client-$profile.service"
@@ -2778,8 +2863,10 @@ write_profile_client_unit() {
       return 1
     }
     ensure_source_route_helper || return 1
+    ensure_client_runtime_binary || return 1
     run_user="$SOURCE_USER"
     set_profile_runtime_permissions "$profile" specific "$run_user" || return 1
+    verify_profile_runtime_access "$profile" "$run_user" "$config" || return 1
   else
     set_profile_runtime_permissions "$profile" auto || return 1
   fi
@@ -2794,13 +2881,14 @@ After=network-online.target
 [Service]
 Type=simple
 User=$run_user
-WorkingDirectory=$CLIENT_DIR
+# A dedicated non-root process can traverse only its own profile directory.
+WorkingDirectory=$CLIENT_PROFILES_DIR/$profile
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 # A selected IPv4 source cannot safely govern IPv6 sockets; keep this profile IPv4-only.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
 ExecStartPre=+$SOURCE_ROUTE_HELPER apply $state
-ExecStart=$CLIENT_DIR/trusttunnel_client -c $config
+ExecStart=$CLIENT_RUNTIME_BIN -c $config
 ExecStopPost=+$SOURCE_ROUTE_HELPER remove $state
 Restart=always
 RestartSec=3
@@ -2914,7 +3002,13 @@ configure_client_profile() {
   generated="$profile_dir/generated.toml"
   candidate="$profile_dir/client.toml.new"
   wizard_log="$profile_dir/setup-wizard.log"
-  install -m 0600 "$endpoint_file" "$imported"
+  if ! install -m 0600 "$endpoint_file" "$imported"; then
+    error "Could not import endpoint TOML for profile $profile."
+    rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
+    unset socks_password
+    pause
+    return 1
+  fi
   rm -f "$generated" "$candidate"
 
   if ! (
@@ -2978,7 +3072,13 @@ configure_client_profile() {
     pause
     return 1
   fi
-  install -m 0600 "$candidate" "$profile_dir/client.toml"
+  if ! install -m 0600 "$candidate" "$profile_dir/client.toml"; then
+    error "Could not save client TOML for profile $profile."
+    rollback_client_profile "$profile" "$backup_path" "$had_profile" "$was_active"
+    unset socks_password
+    pause
+    return 1
+  fi
   rm -f "$candidate" "$generated"
   if [[ "$mode" == "socks" ]]; then
     if [[ "$source_choice" == "auto" ]]; then
